@@ -1,0 +1,43 @@
+[workspace]
+members = [
+  "crates/sonetto_core",
+  "crates/sonetto_wasm",
+  "crates/sonetto_trainer",
+]
+# Prevent native-only crates from being built by default when working on the WASM target.
+#
+# - `sonetto_trainer` depends on native HTTP + filesystem crates (e.g. `ureq`), and is not
+#   intended for `wasm32-unknown-unknown`.
+# - Keeping it as a workspace member is still useful for local native workflows.
+default-members = [
+  "crates/sonetto_core",
+  "crates/sonetto_wasm",
+]
+resolver = "2"
+
+# -----------------------------------------------------------------------------
+# Build profiles (P0-0)
+# -----------------------------------------------------------------------------
+#
+# These settings match typical "engine" defaults (Egaroucid/Sensei-style):
+# - maximize single-thread throughput
+# - keep release binaries small
+#
+# NOTE: The WASM build can still override profiles on the JS/build side if needed.
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+# Keep debug builds responsive while still avoiding totally unoptimized hot paths.
+opt-level = 1
+
+[profile.bench]
+opt-level = 3
+lto = true
+codegen-units = 1
+

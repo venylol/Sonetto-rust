@@ -1,0 +1,138 @@
+name: Deploy to Cloudflare Pages
+
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+concurrency:
+  group: "pages-deploy-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Setup Node.js (UI build + self-check)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build UI assets (Tailwind + local vendor)
+        run: |
+          cd web
+          npm ci
+          npm run localize:ui
+
+      - name: Install Rust (stable) + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Rust (nightly) + wasm32 target + rust-src (for threads builds)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          targets: wasm32-unknown-unknown
+          components: rust-src
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Install binaryen (wasm-opt) + unzip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binaryen unzip
+          wasm-opt --version
+
+      - name: Build WASM variants (scalar / simd / threads)
+        run: |
+          bash scripts/build_wasm_threads_dual.sh
+        env:
+          SONETTO_THREADS_TOOLCHAIN: nightly
+
+      - name: Build Cloudflare Pages ZIP (root contains Sonetto.html, _headers, pkg/, ...)
+        run: |
+          bash scripts/build_pages_zip.sh
+
+      - name: Install self-check dependencies
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Self-check Pages ZIP
+        run: |
+          npm run selfcheck:pages
+
+      - name: Upload self-check report (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonetto_selfcheck_report
+          path: selfcheck_report
+
+      - name: Upload Pages ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonetto_pages_root
+          path: sonetto_pages_root.zip
+
+      - name: Assemble Pages output under /Sonetto
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf pages_dist
+          mkdir -p pages_dist/Sonetto
+
+          unzip -q sonetto_pages_root.zip -d pages_dist/Sonetto
+
+          # Ensure /Sonetto/ works (index.html)
+          if [ -f "pages_dist/Sonetto/Sonetto.html" ]; then
+            cp pages_dist/Sonetto/Sonetto.html pages_dist/Sonetto/index.html
+          fi
+
+          # Root redirect for convenience
+          cat > pages_dist/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>Sonetto</title>
+            <meta http-equiv="refresh" content="0; url=/Sonetto/" />
+          </head>
+          <body>
+            <p>Redirecting to <a href="/Sonetto/">/Sonetto/</a>...</p>
+            <script>
+              try { location.replace('/Sonetto/' + (location.search || '') + (location.hash || '')); } catch (_) { location.href = '/Sonetto/'; }
+            </script>
+          </body>
+          </html>
+          EOF
+
+          # Keep a copy of _headers at site root so /Sonetto/* rules always apply
+          if [ -f "pages_dist/Sonetto/_headers" ]; then
+            cp pages_dist/Sonetto/_headers pages_dist/_headers
+          fi
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: sonettoai
+          directory: pages_dist
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}

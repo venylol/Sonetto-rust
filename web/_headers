@@ -1,0 +1,42 @@
+# -----------------------------------------------------------------------------
+# SharedArrayBuffer / WASM threads (rayon)
+# -----------------------------------------------------------------------------
+#
+# WebAssembly threads require `crossOriginIsolated`, which requires BOTH:
+#   - Cross-Origin-Opener-Policy: same-origin
+#   - Cross-Origin-Embedder-Policy: require-corp
+#
+# IMPORTANT: If you add new cross-origin <script>/<link> resources in the HTML,
+# ensure they are fetched via CORS (e.g. `crossorigin="anonymous"`) and that the
+# CDN sends appropriate `Access-Control-Allow-Origin` headers.
+
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+
+
+/Sonetto/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+
+
+# -----------------------------------------------------------------------------
+# Cache static assets aggressively.
+# -----------------------------------------------------------------------------
+# Pages will serve these as raw .gz files (no content-encoding); the app
+# decompresses in-browser.
+
+/*.wasm
+  Content-Type: application/wasm
+  Cache-Control: public, max-age=31536000, immutable
+
+/*.gz
+  Content-Type: application/octet-stream
+  Cache-Control: public, max-age=31536000, immutable
+
+
+/service-worker.js
+  Cache-Control: no-cache
+
+/Sonetto/service-worker.js
+  Cache-Control: no-cache

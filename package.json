@@ -1,0 +1,12 @@
+{
+  "name": "sonetto-ci",
+  "private": true,
+  "type": "module",
+  "description": "CI-only tooling (self-check) for Sonetto Cloudflare Pages builds",
+  "scripts": {
+    "selfcheck:pages": "node scripts/self_check_pages.mjs --zip sonetto_pages_root.zip --out selfcheck_report"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}

@@ -1,0 +1,45 @@
+[package]
+name = "sonetto_wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"] 
+
+[dependencies]
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+libm = "0.2.15"
+wasm-bindgen-rayon = { version = "1.3", optional = true }
+rayon = { version = "1.10", optional = true }
+sonetto_core = { path = "../sonetto_core", default-features = false, features = ["stability_cutoff", "tt_plain"] }
+
+[features]
+# Default WASM build focuses on interactive strength + throughput.
+#
+# We enable `flips_table` by default because it is a high-ROI speedup on the
+# hot flip-generation path (Egaroucid-style 8-bit line table). If you want the
+# smallest init cost / binary, build with `--no-default-features`.
+default = ["flips_table"]
+
+# Enable Rayon-based threading support on WebAssembly (requires SharedArrayBuffer + COOP/COEP).
+wasm-bindgen-rayon = ["dep:wasm-bindgen-rayon", "dep:rayon", "sonetto_core/parallel_rayon"]
+
+# Enable Wasm SIMD (simd128) kernels in sonetto_core (requires building with +simd128).
+wasm_simd = ["sonetto_core/wasm_simd"]
+
+# Enable table-driven flips in the core engine.
+#
+# This increases one-time initialization cost (the line-table is built at
+# runtime), but it is typically repaid quickly in search speed.
+flips_table = ["sonetto_core/flips_table"]
+
+# wasm-pack automatically runs `wasm-opt` when it is available on PATH.
+# Recent Rust/LLVM toolchains emit post-MVP Wasm ops (e.g. bulk-memory,
+# sign-ext, non-trapping float-to-int) and wasm-pack's built-in wasm-opt step
+# may fail validation unless special flags are provided.
+#
+# We disable wasm-pack's internal wasm-opt and run our own post-pass from the
+# build scripts (`scripts/wasm_opt_dir.sh`) with explicit feature enables.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

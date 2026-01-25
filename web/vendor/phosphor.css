@@ -1,0 +1,62 @@
+/*
+  Local fallback for Phosphor icons.
+  - Keeps existing <i class="ph ph-..."> markup working without external fonts.
+  - If you prefer the official Phosphor icon font, run:
+      node ../scripts/localize_ui.mjs --with-phosphor
+    which will download the official CSS + fonts into ./vendor/ and overwrite this file.
+*/
+
+.ph {
+  display: inline-block;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: -0.125em;
+}
+
+.ph::before {
+  content: "";
+}
+
+/* Icon mappings (Unicode fallbacks) */
+.ph.ph-arrow-circle-left::before { content: "◀️"; }
+.ph.ph-arrow-circle-right::before { content: "▶️"; }
+.ph.ph-brain::before { content: "🧠"; }
+.ph.ph-caret-down::before { content: "▾"; }
+.ph.ph-check::before { content: "✅"; }
+.ph.ph-check-circle::before { content: "✅"; }
+.ph.ph-circles-three::before { content: "⏳"; }
+.ph.ph-copy::before { content: "📋"; }
+.ph.ph-eraser::before { content: "🧽"; }
+.ph.ph-floppy-disk::before { content: "💾"; }
+.ph.ph-lightning::before { content: "⚡"; }
+.ph.ph-package::before { content: "📦"; }
+.ph.ph-pencil-simple::before { content: "✏️"; }
+.ph.ph-robot::before { content: "🤖"; }
+.ph.ph-skip-back-circle::before { content: "⏮️"; }
+.ph.ph-skip-forward-circle::before { content: "⏭️"; }
+.ph.ph-sliders-horizontal::before { content: "🎚️"; }
+.ph.ph-spinner::before { content: "⏳"; }
+.ph.ph-stop-circle::before { content: "⏹️"; }
+.ph.ph-upload-simple::before { content: "⬆️"; }
+
+.ph.ph-arrow-circle-left::before { content: "◀️"; }
+.ph.ph-arrow-circle-right::before { content: "▶️"; }
+.ph.ph-brain::before { content: "🧠"; }
+.ph.ph-caret-down::before { content: "▾"; }
+.ph.ph-check::before { content: "✅"; }
+.ph.ph-check-circle::before { content: "✅"; }
+.ph.ph-circles-three::before { content: "⏳"; }
+.ph.ph-copy::before { content: "📋"; }
+.ph.ph-eraser::before { content: "🧽"; }
+.ph.ph-floppy-disk::before { content: "💾"; }
+.ph.ph-lightning::before { content: "⚡"; }
+.ph.ph-package::before { content: "📦"; }
+.ph.ph-pencil-simple::before { content: "✏️"; }
+.ph.ph-robot::before { content: "🤖"; }
+.ph.ph-skip-back-circle::before { content: "⏮️"; }
+.ph.ph-skip-forward-circle::before { content: "⏭️"; }
+.ph.ph-sliders-horizontal::before { content: "🎚️"; }
+.ph.ph-spinner::before { content: "⏳"; }
+.ph.ph-stop-circle::before { content: "⏹️"; }
+.ph.ph-upload-simple::before { content: "⬆️"; }

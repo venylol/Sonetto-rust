@@ -1,0 +1,10 @@
+{
+  "weights": {
+    "url": "./eval.egev2.gz",
+    "compression": "gzip"
+  },
+  "book": {
+    "url": "./book.egbk3.gz",
+    "compression": "gzip"
+  }
+}

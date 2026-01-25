@@ -1,0 +1,22 @@
+# Phase 2 regression corpus for SenseiAlphaBeta.
+#
+# Format: 64 chars of board (bit index order A1..H8), then side-to-move (X/O).
+# '-' empty, 'X' black, 'O' white.
+#
+# These are small midgame positions (roughly 6-12 plies from start) generated
+# with a deterministic RNG.
+#
+# Used by: crates/sonetto_core/test/sensei_ab_regression.rs
+
+--------------O---X--O-----XOX-----OXX-----O--------------------X
+------------------X-XO----OOOO-----OXX-----X-X----X-------------O
+---------X--------X-----XOXXX---O--XX-------X-------------------O
+-----------------XX------OXOOO----XXO-------O-------O-----------X
+---------------------------OXX-----OXX-----O-O----XO------------X
+------O------O-----XO------OXXX---OXOOO----X-O-------O----------X
+--------------------O------OO-----OOO--X----XOXO----XX-----X----X
+-----------O-O-----XOXXX---OXXX---OXX-------X-------------------O
+--------------XO---X-XXO---XXXO----XXO-------O------------------X
+-----------O-------O-------OX-----OOOOO---XO------OOO-----------X
+------------X-----X--X-----XOXX----OOO----OXX----O--------------X
+----------O-------XO-O-----XO------XOOO----XXO-----XO------O----X

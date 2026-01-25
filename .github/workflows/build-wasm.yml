@@ -1,0 +1,95 @@
+name: build-wasm
+
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # If you store large weights/book files via Git LFS, enable this so
+          # the workflow pulls real binary content instead of pointer files.
+          lfs: true
+
+      - name: Install Rust (stable) + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # wasm-bindgen-rayon (threads) requires wasm32 target-features that may be
+      # gated on nightly in some Rust versions. We keep stable as the default
+      # for non-threads builds and use nightly only where needed.
+      # wasm-bindgen-rayon requires nightly + build-std.
+      # Pin the nightly toolchain to a known-good version to avoid regressions
+      # that can break shared memory initialization (e.g. DataCloneError for
+      # WebAssembly.Memory on worker startup).
+      - name: Install Rust (nightly) + wasm32 target + rust-src (for threads builds)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          targets: wasm32-unknown-unknown
+          components: rust-src
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+
+      - name: Install binaryen (wasm-opt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binaryen
+          wasm-opt --version
+
+      - name: Build WASM variants (scalar / simd / threads)
+        run: |
+          bash scripts/build_wasm_threads_dual.sh
+        env:
+          # Keep build scripts and CI aligned.
+          SONETTO_THREADS_TOOLCHAIN: nightly
+
+      - name: Build Cloudflare Pages ZIP (root contains index.html)
+        run: |
+          bash scripts/build_pages_zip.sh
+
+      # -----------------------------
+      # Self-check (strict smoke test)
+      # -----------------------------
+      # If this step passes, the produced ZIP should work when uploaded to
+      # Cloudflare Pages (threads/no-threads, UI, weights/book, analysis, AI).
+      - name: Setup Node.js (for self-check)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright (Chromium)
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Self-check Cloudflare Pages ZIP
+        run: |
+          npm run selfcheck:pages
+
+      - name: Upload self-check report (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonetto_selfcheck_report
+          path: selfcheck_report
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonetto_pages_root
+          path: sonetto_pages_root.zip

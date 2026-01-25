@@ -1,0 +1,3866 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Sonetto</title>
+<link rel="icon" href="data:,">
+
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#2f4f3e">
+<meta name="application-name" content="Sonetto">
+
+<!-- iOS / iPadOS -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Sonetto">
+<link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png">
+
+<!-- Windows -->
+<meta name="msapplication-TileColor" content="#2f4f3e">
+<meta name="msapplication-TileImage" content="./icons/mstile-144.png">
+
+<!-- Favicons -->
+<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="./icons/favicon-16.png">
+
+
+<!--
+  Local UI/vendor assets (crossOriginIsolated / COOP+COEP friendly):
+  - tailwind.css: generated at build time (see scripts/localize_ui.mjs)
+  - phosphor.css + fonts: downloaded and hosted locally (optional)
+  - fflate.umd.js: gzip fallback for older browsers
+  NOTE: Keeping these local avoids COEP/COOP cross-origin blocking.
+-->
+<link rel="stylesheet" href="./vendor/tailwind.css">
+<link rel="stylesheet" href="./vendor/phosphor.css">
+
+<!-- ZIP import/export (local; replaces JSZip CDN) -->
+<script src="./zip_local.js"></script>
+
+<!-- gzip fallback (used only if DecompressionStream is unavailable) -->
+<script src="./vendor/fflate.umd.js"></script>
+<!-- Opening book loader (Egaroucid .egbk3) -->
+<script src="./egbk3_book.js"></script>
+<style>
+    /*
+      Keep the page crossOriginIsolated-friendly: avoid loading cross-origin
+      fonts (COEP require-corp would otherwise block them unless CORP/CORS).
+      System fonts are fast and reliable.
+    */
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; background-color: #f5f5f4; touch-action: manipulation; }
+    .wood-texture {
+        background-color: #e5ccab;
+        background-image: linear-gradient(90deg, rgba(255,255,255,0.1) 0%, rgba(0,0,0,0.05) 100%),
+            url("data:image/svg+xml,%3Csvg width='100' height='100' viewBox='0 0 100 100' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.6' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100' height='100' filter='url(%23noise)' opacity='0.08'/%3E%3C/svg%3E");
+        box-shadow: inset 2px 2px 5px rgba(255,255,255,0.3), inset -2px -2px 5px rgba(0,0,0,0.1);
+    
+        /* Perf: isolate heavy background into its own compositor layer */
+        transform: translateZ(0);
+        will-change: transform;
+    }
+    .cell { background-color: #5c8d73; box-shadow: inset 1px 1px 3px rgba(0,0,0,0.2); transition: background-color 0.2s; position: relative; }
+    .board-grid { background-color: #2f4f3e; padding: 2px; border-radius: 2px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3); }
+	    /*
+	      Ensure the 8x8 board is always visible.
+	      --------------------------------------
+	      Sonetto can be shipped with a *minimal* Tailwind subset (vendor/tailwind.css)
+	      to stay offline-friendly + COOP/COEP compatible. That subset intentionally
+	      does not always include arbitrary sizing utilities like:
+	        - w-[320px], h-[320px]
+	        - sm:w-[400px], md:w-[500px]
+	        - grid-cols-8, grid-rows-8
+	
+	      If those classes are missing, #board collapses and the UI looks like the
+	      chessboard is "not rendered".
+	
+	      Use an ID selector (higher specificity than utility classes) to guarantee
+	      correct layout regardless of which Tailwind build is deployed.
+	    */
+	    #board {
+	        display: grid;
+	        grid-template-columns: repeat(8, minmax(0, 1fr));
+	        grid-template-rows: repeat(8, minmax(0, 1fr));
+	        width: 320px;
+	        height: 320px;
+	        gap: 2px; /* ~= tailwind gap-0.5 */
+	        margin-left: 1.25rem; /* ~= tailwind ml-5 */
+	        margin-top: 1rem; /* ~= tailwind mt-4 */
+	    }
+	    @media (min-width: 640px) { #board { width: 400px; height: 400px; } }
+	    @media (min-width: 768px) { #board { width: 500px; height: 500px; } }
+    .disc { width: 85%; height: 85%; border-radius: 50%; transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275); position: relative; display: flex; justify-content: center; align-items: center; font-size: 12px; font-weight: 700; user-select: none; z-index: 10; pointer-events: none; 
+        /* Perf: hint GPU compositing for drop/scale animations */
+        will-change: transform;
+        backface-visibility: hidden;
+    }
+    .disc.black { background: radial-gradient(circle at 35% 35%, #555, #1a1a1a, #000); box-shadow: 2px 2px 4px rgba(0,0,0,0.6), inset 1px 1px 2px rgba(255,255,255,0.2); color: rgba(255,255,255,0.9); }
+    .disc.white { background: radial-gradient(circle at 35% 35%, #fff, #f0f0f0, #d1d1d1); box-shadow: 2px 2px 4px rgba(0,0,0,0.4), inset -1px -1px 2px rgba(0,0,0,0.1); color: #333; }
+    .last-move-marker { position: absolute; width: 8px; height: 8px; background-color: #ef4444; border-radius: 50%; box-shadow: 0 0 4px rgba(239, 68, 68, 0.8); z-index: 20; pointer-events: none; }
+    .legal-move-hint { width: 25%; height: 25%; border-radius: 50%; background-color: rgba(0, 0, 0, 0.2); box-shadow: inset 0 0 2px rgba(0,0,0,0.2); z-index: 5; pointer-events: none; }
+    .cell:hover .legal-move-hint { background-color: rgba(0, 0, 0, 0.4); transform: scale(1.2); transition: all 0.2s; }
+    .eval-score { position: absolute; z-index: 30; font-weight: 800; font-size: 1.1rem; text-shadow: -1px -1px 0 rgba(0,0,0,0.6), 1px -1px 0 rgba(0,0,0,0.6), -1px 1px 0 rgba(0,0,0,0.6), 1px 1px 0 rgba(0,0,0,0.6); pointer-events: none; transition: all 0.2s; font-family: ui-sans-serif, system-ui, monospace; }
+    .score-best { color: #3b82f6; z-index: 31; transform: scale(1.2); text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff; }
+    .score-normal { color: #fbbf24; }
+    @media (min-width: 768px) { .eval-score { font-size: 1.3rem; } }
+    
+    input[type=range].depth-slider { -webkit-appearance: none; width: 100%; height: 24px; background: transparent; touch-action: pan-x; cursor: grab; display: block; margin: 0; }
+    input[type=range].depth-slider:active { cursor: grabbing; }
+    input[type=range].depth-slider::-webkit-slider-thumb { -webkit-appearance: none; height: 16px; width: 16px; border-radius: 50%; background: #57534e; cursor: pointer; margin-top: -6px; border: 2px solid white; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+    input[type=range].depth-slider::-webkit-slider-runnable-track { width: 100%; height: 4px; cursor: pointer; background: #e5e7eb; border-radius: 2px; }
+    
+    .active-move { background-color: #e5e7eb; border-left: 4px solid #4b5563; font-weight: 700; }
+    .edit-overlay { opacity: 0.5; pointer-events: none; filter: grayscale(1); }
+    .brush-active { box-shadow: 0 0 0 3px #3b82f6; transform: scale(1.1); }
+    .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 100; display: flex; justify-content: center; align-items: center; }
+    .modal-overlay.hidden { display: none !important; }
+    .modal-content { background: white; padding: 24px; border-radius: 12px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1); max-width: 90%; width: 320px; text-align: center; }
+    .custom-scroll::-webkit-scrollbar { width: 4px; }
+    .custom-scroll::-webkit-scrollbar-track { background: transparent; }
+    .custom-scroll::-webkit-scrollbar-thumb { background: #d6d3d1; border-radius: 2px; }
+    .status-pill { transition: all 0.3s ease; }
+    .status-idle { background-color: #e7e5e4; color: #57534e; }
+    .status-working { background-color: #fef3c7; color: #92400e; animation: pulse-yellow 2s infinite; }
+    .status-done { background-color: #dcfce7; color: #166534; }
+    @keyframes pulse-yellow { 0% { opacity: 0.8; } 50% { opacity: 1; } 100% { opacity: 0.8; } }
+    details > summary { list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
+    .settings-group { margin-bottom: 12px; }
+    .settings-label { display: flex; justify-content: space-between; font-size: 10px; font-weight: 700; color: #57534e; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+    .settings-value { color: #0369a1; font-family: monospace; }
+    .verse-overlay {
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(10, 10, 12, 0.95);
+        backdrop-filter: blur(8px);
+        z-index: 9999;
+        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        opacity: 0; pointer-events: none; transition: opacity 1.5s cubic-bezier(0.23, 1, 0.32, 1);
+        font-family: 'JetBrains Mono', monospace;
+    }
+    .verse-overlay.active { opacity: 1; pointer-events: auto; }
+    .verse-header {
+        font-size: 1.8rem; letter-spacing: 0.15em;
+        color: #e5e5e5; margin-bottom: 2rem;
+        opacity: 0; transform: translateY(-20px);
+        text-shadow: 0 0 15px rgba(255,255,255,0.3);
+        font-weight: 300;
+    }
+    .verse-content { text-align: center; position: relative; z-index: 10; }
+    .verse-line {
+        font-size: 1rem; margin-bottom: 1.2rem;
+        color: #a3a3a3; min-height: 1.5em;
+    }
+    .highlight-text { color: #fff; text-shadow: 0 0 8px rgba(255,255,255,0.8); }
+    .crystal-particle {
+        position: absolute; bottom: -20px;
+        background: radial-gradient(circle, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0) 70%);
+        border-radius: 50%; opacity: 0;
+        filter: drop-shadow(0 0 5px rgba(16, 185, 129, 0.5));
+        animation: riseAndFade 5s infinite ease-out;
+    }
+    @keyframes riseAndFade {
+        0% { transform: translateY(0) scale(0.2); opacity: 0; }
+        20% { opacity: 0.8; }
+        100% { transform: translateY(-110vh) scale(1.5); opacity: 0; }
+    }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+/* --- 移动端适配代码 Start --- */
+ @media (max-width: 768px) {
+    .verse-overlay {
+        padding: 20px; /* 增加内边距，防止文字贴边 */
+    }
+    .verse-header {
+        font-size: 1.2rem; /* 手机上标题调小 */
+        margin-bottom: 1.5rem;
+        line-height: 1.4;
+    }
+    .verse-line {
+        font-size: 0.85rem; /* 手机上正文调小 */
+        margin-bottom: 0.8rem;
+        word-wrap: break-word; /* 允许长单词换行 */
+        white-space: pre-wrap; /* 允许文本自然换行 */
+        max-width: 100%;
+    }
+}
+/* --- 移动端适配代码 End --- */
+</style>
+</head>
+<body class="min-h-screen flex flex-col items-center py-6 md:py-10 px-4 text-stone-800">
+
+<div id="app-loading-overlay" class="fixed inset-0 z-[100] bg-[#f5f5f4] flex flex-col items-center justify-center transition-opacity duration-500">
+    <div class="flex flex-col items-center gap-4 animate-in fade-in zoom-in duration-300">
+        <div class="w-16 h-16 bg-stone-800 rounded-2xl flex items-center justify-center shadow-xl mb-2">
+            <i class="ph ph-circles-three text-3xl text-white animate-spin-slow"></i>
+        </div>
+        
+        <div class="text-center">
+            <h2 class="text-xl font-bold text-stone-800 mb-1">Sonetto</h2>
+            <p id="loading-text" class="text-xs text-stone-500 font-mono" data-i18n="loadingInitializing">Initializing...</p>
+        </div>
+
+        <div class="w-48 h-1.5 bg-stone-200 rounded-full overflow-hidden mt-2 relative">
+            <div id="loading-bar" class="absolute left-0 top-0 h-full bg-stone-800 w-0 transition-all duration-300 ease-out"></div>
+        </div>
+    </div>
+</div>
+<style>
+    /* 定义缓慢旋转动画 */
+    @keyframes spin-slow { to { transform: rotate(360deg); } }
+    .animate-spin-slow { animation: spin-slow 3s linear infinite; }
+</style>
+
+<div class="w-full max-w-6xl flex flex-col lg:flex-row gap-6 lg:gap-8 items-center lg:items-start justify-center">
+    <div class="flex-1 flex flex-col items-center w-full max-w-[600px] mx-auto lg:mx-0">
+        <div class="w-full flex flex-col md:flex-row justify-between items-center md:items-end gap-5 mb-6 md:mb-4 transition-all">
+            <div class="text-center md:text-left">
+                <h1 class="text-3xl font-bold tracking-tight text-stone-800 flex items-center justify-center md:justify-start gap-2">
+                    <i class="ph ph-circles-three text-stone-600"></i> <span class="italic font-serif">Sonetto</span>
+                </h1>
+                <div class="flex items-center justify-center md:justify-start gap-2 mt-1">
+                    <p class="text-stone-500 text-sm" data-i18n="subtitle">Adaptive Parallel Engine</p>
+                    <span class="px-2 py-0.5 bg-green-100 text-green-800 text-[10px] font-bold rounded border border-green-200">MULTI-CORE</span>
+                </div>
+            </div>
+
+            <div class="flex flex-col items-center md:items-end gap-3 w-full md:w-auto bg-stone-100 md:bg-transparent p-3 md:p-0 rounded-xl md:rounded-none border border-stone-200 md:border-none">
+                <select id="lang-select" onchange="changeLanguage(this.value)" class="w-full md:w-auto text-xs bg-white border border-stone-300 rounded-lg px-3 py-2 text-stone-600 focus:outline-none shadow-sm text-center md:text-right">
+                    <option value="en" selected>EN - English</option>
+                    <option value="zh">CN - 简体中文</option>
+                </select>
+
+                <div class="flex gap-6 text-sm font-medium text-stone-600 justify-center w-full">
+                    <label class="flex items-center gap-2 cursor-pointer hover:text-stone-900 transition p-1 bg-white md:bg-transparent px-3 md:px-0 rounded shadow-sm md:shadow-none border md:border-none border-stone-200">
+                        <input type="checkbox" id="show-numbers" class="accent-stone-700 w-4 h-4 md:w-auto md:h-auto" onchange="uiRenderCurrentState()">
+                        <span>#</span>
+                    </label>
+                    <label class="flex items-center gap-2 cursor-pointer hover:text-stone-900 transition p-1 bg-white md:bg-transparent px-3 md:px-0 rounded shadow-sm md:shadow-none border md:border-none border-stone-200">
+                        <input type="checkbox" id="show-legal" class="accent-stone-700 w-4 h-4 md:w-auto md:h-auto" checked onchange="uiRenderCurrentState()">
+                        <span data-i18n="legal">Legal</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+        <div id="editor-toolbar" class="hidden w-full bg-white p-3 rounded-xl shadow-sm border border-orange-200 mb-4 flex items-center justify-between animate-in fade-in slide-in-from-top-2">
+            <div class="flex items-center gap-2">
+                <span class="text-xs font-bold text-orange-600 uppercase mr-2" data-i18n="editMode">Edit Mode</span>
+                <button onclick="setBrush(BLACK)" id="brush-black" class="w-10 h-10 rounded-full bg-stone-100 flex items-center justify-center hover:bg-stone-200 transition border border-stone-300"><div class="w-6 h-6 rounded-full bg-black shadow-sm"></div></button>
+                <button onclick="setBrush(WHITE)" id="brush-white" class="w-10 h-10 rounded-full bg-stone-100 flex items-center justify-center hover:bg-stone-200 transition border border-stone-300"><div class="w-6 h-6 rounded-full bg-white border border-stone-300 shadow-sm"></div></button>
+                <button onclick="setBrush(EMPTY)" id="brush-empty" class="w-10 h-10 rounded-full bg-stone-100 flex items-center justify-center hover:bg-stone-200 transition border border-stone-300 text-stone-500" title="Eraser"><i class="ph ph-eraser text-xl"></i></button>
+            </div>
+            <button onclick="finishEditing()" class="px-4 py-2 bg-stone-800 text-white text-sm font-bold rounded-lg hover:bg-stone-700 shadow-sm" data-i18n="done">Done</button>
+        </div>
+        <div class="relative p-3 rounded-lg shadow-2xl wood-texture select-none touch-none">
+            <div class="absolute top-0 left-8 right-3 h-6 flex justify-between items-end text-xs font-bold opacity-60 pointer-events-none">
+                <div class="flex-1 text-center">a</div><div class="flex-1 text-center">b</div><div class="flex-1 text-center">c</div><div class="flex-1 text-center">d</div><div class="flex-1 text-center">e</div><div class="flex-1 text-center">f</div><div class="flex-1 text-center">g</div><div class="flex-1 text-center">h</div>
+            </div>
+            <div class="absolute top-3 bottom-3 left-0 w-6 flex flex-col justify-between items-center text-xs font-bold opacity-60 pointer-events-none pt-1.5 pb-1.5">
+                <div class="flex-1 flex items-center">1</div><div class="flex-1 flex items-center">2</div><div class="flex-1 flex items-center">3</div><div class="flex-1 flex items-center">4</div><div class="flex-1 flex items-center">5</div><div class="flex-1 flex items-center">6</div><div class="flex-1 flex items-center">7</div><div class="flex-1 flex items-center">8</div>
+            </div>
+            <div id="board" class="board-grid grid grid-cols-8 grid-rows-8 w-[320px] h-[320px] sm:w-[400px] sm:h-[400px] md:w-[500px] md:h-[500px] gap-0.5 ml-5 mt-4" onmousedown="handleBoardMouseDown(event)" onmouseup="handleBoardMouseUp(event)" onmouseleave="handleBoardMouseUp(event)" ontouchstart="handleBoardTouchStart(event)" ontouchend="handleBoardTouchEnd(event)"></div>
+            <div id="game-result-msg" class="absolute inset-0 flex items-center justify-center pointer-events-none hidden z-40">
+                <div class="bg-stone-900/90 text-white px-6 py-4 rounded-xl shadow-2xl backdrop-blur-sm transform scale-110 animate-in fade-in zoom-in duration-300">
+                    <div class="text-2xl font-bold text-center mb-1" id="result-title">Black Wins!</div>
+                    <div class="text-sm text-stone-300 font-mono text-center" id="result-score">40 - 24</div>
+                </div>
+            </div>
+        </div>
+        <div class="mt-4 w-full flex items-center justify-center">
+             <div id="status-bar-pill" class="status-pill status-idle px-5 py-2 rounded-full text-xs font-bold flex items-center gap-2 shadow-sm border border-stone-200">
+                  <i id="status-icon" class="ph ph-check-circle text-lg"></i><span id="status-msg">Ready</span>
+             </div>
+        </div>
+        <div class="mt-4 flex justify-between items-center w-full px-2">
+            <div class="flex items-center gap-4 transition-opacity duration-300" id="black-panel">
+                <div class="relative">
+                    <div class="w-12 h-12 rounded-full bg-black shadow-lg flex items-center justify-center border-2 border-transparent" id="black-indicator"><span class="text-white font-bold text-lg" id="black-count">2</span></div>
+                    <div id="black-turn-dot" class="absolute -bottom-2 left-1/2 -translate-x-1/2 w-2 h-2 bg-stone-800 rounded-full opacity-0 transition-opacity"></div>
+                </div>
+                <div class="font-bold text-stone-700 hidden sm:block" data-i18n="black">Black</div>
+            </div>
+            <div class="text-center">
+                 <div id="status-text" class="text-lg font-bold text-stone-800" data-i18n="ready">Ready</div>
+                 <div id="move-text" class="text-xs text-stone-500 font-mono mt-1">-</div>
+                 <div id="engine-type" class="text-[10px] uppercase font-bold text-stone-400 mt-1">Engine: Standby</div>
+            </div>
+            <div class="flex items-center gap-4 transition-opacity duration-300 flex-row-reverse" id="white-panel">
+                <div class="relative">
+                    <div class="w-12 h-12 rounded-full bg-white shadow-lg flex items-center justify-center border-2 border-stone-200" id="white-indicator"><span class="text-stone-800 font-bold text-lg" id="white-count">2</span></div>
+                    <div id="white-turn-dot" class="absolute -bottom-2 left-1/2 -translate-x-1/2 w-2 h-2 bg-stone-800 rounded-full opacity-0 transition-opacity"></div>
+                </div>
+                <div class="font-bold text-stone-700 hidden sm:block" data-i18n="white">White</div>
+            </div>
+        </div>
+        <div id="nav-controls" class="mt-6 w-full bg-white p-4 rounded-xl shadow-sm border border-stone-200 flex flex-col gap-3 transition-opacity">
+            <input type="range" id="history-slider" min="0" max="0" value="0" class="w-full accent-stone-700 cursor-pointer" oninput="jumpToStep(parseInt(this.value))">
+            <div class="flex justify-center gap-4">
+                <button onclick="jumpToStep(0)" class="p-2 text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition" title="Start"><i class="ph ph-skip-back-circle text-2xl"></i></button>
+                <button onclick="step(-1)" class="p-2 text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition" title="Previous"><i class="ph ph-arrow-circle-left text-2xl"></i></button>
+                <button onclick="step(1)" class="p-2 text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition" title="Next"><i class="ph ph-arrow-circle-right text-2xl"></i></button>
+                <button onclick="jumpToEnd()" class="p-2 text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition" title="End"><i class="ph ph-skip-forward-circle text-2xl"></i></button>
+            </div>
+        </div>
+        <button id="btn-edit-toggle" onclick="toggleEditMode()" class="mt-4 w-full bg-white border border-stone-300 text-stone-600 font-bold py-2 px-4 rounded-lg hover:bg-stone-50 transition text-sm flex items-center justify-center gap-2">
+             <i class="ph ph-pencil-simple"></i> <span data-i18n="editBoard">Edit Board</span>
+        </button>
+    </div>
+
+    <div id="sidebar-panel" class="w-full lg:w-80 flex flex-col gap-4 h-full transition-opacity duration-300">
+        
+<details class="bg-white rounded-xl shadow-sm border border-stone-200 group overflow-hidden">
+    <summary class="p-4 flex justify-between items-center cursor-pointer bg-stone-50 hover:bg-stone-100 transition list-none select-none">
+        <span class="text-xs font-bold text-stone-700 uppercase flex items-center gap-2">
+            <i class="ph ph-sliders-horizontal text-lg"></i>
+            <span data-i18n="coreSettings">Core Settings</span>
+        </span>
+        <i class="ph ph-caret-down text-stone-400 group-open:rotate-180 transition-transform"></i>
+    </summary>
+    <div class="p-4 border-t border-stone-100 bg-white">
+        <div class="settings-group">
+            <div class="settings-label">
+                <span data-i18n="midDepth">Mid Depth</span>
+                <span id="val-mid-depth" class="settings-value">9</span>
+            </div>
+            <input type="range" id="cfg-mid-depth" min="4" max="14" value="9" class="depth-slider" oninput="UserConfig.midDepth=parseInt(this.value); updateConfigFromUI()">
+        </div>
+        <div class="settings-group">
+            <div class="settings-label">
+                <span data-i18n="endStart">Endgame Start</span>
+                <span id="val-end-start" class="settings-value">18 E</span>
+            </div>
+            <input type="range" id="cfg-end-start" min="0" max="20" value="18" class="depth-slider" oninput="UserConfig.endStart=parseInt(this.value); updateConfigFromUI()">
+        </div>
+        <div class="settings-group">
+            <div class="settings-label">
+                <span data-i18n="hashSize">Hash Size (MB)</span>
+                <span id="val-hash-size" class="settings-value">8 MB</span>
+            </div>
+            <input type="range" id="cfg-hash-size" min="4" max="10" value="8" step="2" class="depth-slider" oninput="UserConfig.hashSize=parseInt(this.value); updateConfigFromUI()">
+        </div>
+        <div class="settings-group">
+            <div class="settings-label">
+                <span data-i18n="bookRand">Book Accuracy Level</span>
+                <span id="val-book-rand" class="settings-value">0</span>
+            </div>
+            <input type="range" id="cfg-book-rand" min="0" max="10" value="0" step="1" class="depth-slider" oninput="UserConfig.bookRandom=parseInt(this.value); updateConfigFromUI()">
+        </div>
+
+        <div class="settings-group">
+            <div class="settings-label">
+                <span data-i18n="engineBackend">Engine Backend</span>
+                <span id="val-backend" class="settings-value">Sonetto</span>
+            </div>
+            <select id="cfg-backend" class="w-full p-2 border border-stone-200 rounded-lg text-xs text-stone-700 bg-stone-50"
+                onchange="UserConfig.backend=parseInt(this.value); applyBackendToWorkers(); updateConfigFromUI();">
+                <option value="0">Sonetto (Searcher)</option>
+                <option value="1">Sensei (AlphaBeta)</option>
+            </select>
+        </div>
+        <div class="flex items-center justify-between mt-4 pt-2 border-t border-stone-50">
+            <label class="flex items-center gap-2 text-[10px] font-bold text-stone-600 cursor-pointer">
+                <input type="checkbox" id="cfg-use-book" checked onchange="UserConfig.useBook=this.checked; updateConfigFromUI()" class="accent-stone-700">
+                <span data-i18n="useBook">Use Opening Book</span>
+            </label>
+            <button onclick="saveAsDefault()" class="px-3 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 text-[10px] font-bold rounded transition flex items-center gap-1 border border-stone-200">
+                <i class="ph ph-floppy-disk"></i> <span data-i18n="saveDefault">Set Default</span>
+            </button>
+        </div>
+    </div>
+</details>
+
+        <div class="bg-white p-4 rounded-xl shadow-sm border border-stone-200 mb-4 animate-in fade-in slide-in-from-right-4">
+            <div class="flex justify-between items-center mb-3">
+                <h2 class="text-xs font-bold text-stone-800 uppercase tracking-wide flex items-center gap-2"><i class="ph ph-lightning text-yellow-500"></i> <span data-i18n="aiEvolution">AI Evolution</span></h2> <span class="text-[10px] font-mono bg-stone-100 px-2 py-0.5 rounded text-stone-500 border border-stone-200" title="Generation">Gen: <span id="val-gen" class="font-bold text-stone-700">0</span></span>
+            </div>
+            <div class="bg-indigo-50 p-3 rounded border border-indigo-100">
+                <p class="text-[10px] text-indigo-800 mb-2 leading-tight"><strong data-i18n="evolutionTitle">Evolution:</strong> <span data-i18n="evolutionDesc">Save weights & settings.</span></p>
+
+                <input id="import-weights-input" type="file" accept=".zip" style="display:none"
+                  onchange="(async()=>{ try{ if(this.files?.[0]) await importWeightsZip(this.files[0]); }catch(e){ alert(e.message||String(e)); } finally{ this.value=''; } })()"/>
+
+                <div class="flex flex-col gap-2">
+                    <button onclick="openImportWeightsDialog()" class="w-full bg-white hover:bg-stone-50 text-indigo-700 text-xs font-bold py-2 rounded shadow-sm flex items-center justify-center gap-2 transition hover:scale-[1.02] active:scale-95 border border-indigo-200"><i class="ph ph-upload-simple"></i> <span data-i18n="importWeights">Import Weights</span></button>
+                    <div class="grid grid-cols-2 gap-2">
+                        <button onclick="saveEvolvedVersion()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold py-2 rounded shadow-sm flex items-center justify-center gap-2 transition hover:scale-[1.02] active:scale-95"><i class="ph ph-floppy-disk"></i> <span data-i18n="exportWeights">Export Weights</span></button>
+                        <button onclick="exportRunnableVersion()" class="w-full bg-stone-800 hover:bg-stone-700 text-white text-xs font-bold py-2 rounded shadow-sm flex items-center justify-center gap-2 transition hover:scale-[1.02] active:scale-95"><i class="ph ph-package"></i> <span data-i18n="exportRunnable">Runnable ZIP</span></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="bg-white p-5 rounded-xl shadow-sm border border-stone-200">
+            <div class="flex justify-between items-center mb-2">
+                <h2 class="text-sm font-bold text-stone-800 uppercase tracking-wide">Input Moves</h2>
+                <div class="flex gap-2">
+                    <button onclick="copyInput()" class="text-xs text-blue-600 hover:text-blue-800 transition flex items-center gap-1" title="Copy to Clipboard"><i class="ph ph-copy"></i> Copy</button>
+                    <button onclick="clearInput()" class="text-xs text-stone-400 hover:text-red-500 transition" data-i18n="clear">Clear</button>
+                </div>
+            </div>
+            <textarea id="move-input" class="w-full h-24 p-3 border border-stone-200 rounded-lg font-mono text-xs focus:ring-2 focus:ring-stone-400 focus:outline-none resize-none text-stone-600 bg-stone-50" placeholder="e.g. f5d6c3..."></textarea>
+            <div class="flex flex-col gap-3 mt-3">
+                <button onclick="parseAndLoad()" class="w-full bg-stone-800 hover:bg-stone-700 text-white font-bold py-2 px-4 rounded-lg transition text-sm flex items-center justify-center gap-2"><i class="ph ph-upload-simple"></i> <span data-i18n="loadGame">Load Game</span></button>
+                <button id="btn-analyze" onclick="toggleAnalysisMode()" class="w-full bg-stone-200 hover:bg-stone-300 text-stone-700 font-bold py-2 px-4 rounded-lg transition text-sm flex items-center justify-center gap-2 shadow-sm"><i id="icon-analyze" class="ph ph-brain"></i> <span id="text-analyze" data-i18n="analyzeOff">Analysis: OFF</span></button>
+                <div class="bg-stone-50 p-3 rounded border border-stone-100 flex flex-col gap-3">
+                    <div>
+                        <div class="flex justify-between items-center text-xs font-bold text-stone-500 mb-1"><span>Engine Config</span><span id="depth-display" class="text-green-700">Rain Hybrid</span></div>
+                        <div class="text-[10px] text-stone-400 leading-tight">
+                            <span class="text-stone-600 font-bold">Smart Depths</span><br>
+                            End (<span id="txt-end-depth">18</span>E): <span class="text-red-600 font-bold">Exact Solver</span><br>
+                            Mid (><span id="txt-end-plus-4">22</span>E): <span class="text-indigo-600 font-bold">Adaptive <span id="txt-mid-depth">8</span></span><br>
+                            NPS: <span id="stat-nps" class="text-stone-800 font-mono font-bold">0</span> N/s
+                        </div>
+                    </div>
+                </div>
+                <button id="btn-ai-play" onclick="handleAiButton()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg transition text-sm flex items-center justify-center gap-2 shadow-md"><i class="ph ph-robot"></i> <span data-i18n="playAi">Play with AI</span></button>
+                <div id="analysis-details-panel" class="hidden animate-in fade-in slide-in-from-top-1">
+                     <div class="text-[10px] font-bold text-stone-400 uppercase tracking-wide mb-1 flex justify-between"><span>Evaluation Details</span><span class="text-stone-300">Raw Values</span></div>
+                     <div id="analysis-results-text" class="custom-scroll w-full p-2 bg-stone-50 border border-stone-200 rounded font-mono text-[10px] text-stone-600 h-28 overflow-y-auto leading-relaxed whitespace-pre-wrap">Waiting for analysis...</div>
+                </div>
+            </div>
+        </div>
+        <div class="bg-white rounded-xl shadow-sm border border-stone-200 flex-1 flex flex-col overflow-hidden h-[400px] lg:h-[500px]">
+            <div class="p-4 border-b border-stone-100 bg-stone-50"><h2 class="text-sm font-bold text-stone-800 uppercase tracking-wide">Transcript</h2></div>
+            <div id="move-history-list" class="flex-1 overflow-y-auto p-0 relative"></div>
+        </div>
+    </div>
+</div>
+
+<div id="credits-footer" class="fixed bottom-2 right-2 md:bottom-2 md:right-4 text-[10px] text-stone-400 cursor-pointer hover:text-stone-600 transition-colors select-none font-medium opacity-80 z-50 bg-stone-100/50 px-2 py-1 rounded backdrop-blur-sm" onclick="editCredits()">本程序由瑞瑞使用AI制作</div><div id="turn-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+        <h3 class="text-lg font-bold text-stone-800 mb-2" data-i18n="whoseTurn">Whose Turn?</h3>
+        <p class="text-sm text-stone-500 mb-6">Both players have valid moves.</p>
+        <div class="flex gap-4 justify-center">
+            <button onclick="selectTurn(BLACK)" class="flex-1 py-3 bg-stone-800 text-white rounded-lg hover:bg-stone-700 transition font-bold flex flex-col items-center gap-1"><div class="w-4 h-4 rounded-full bg-black border border-stone-600"></div> Black</button>
+            <button onclick="selectTurn(WHITE)" class="flex-1 py-3 bg-white border border-stone-200 text-stone-800 rounded-lg hover:bg-stone-50 transition font-bold flex flex-col items-center gap-1"><div class="w-4 h-4 rounded-full bg-white border border-stone-400"></div> White</button>
+        </div>
+    </div>
+</div>
+<div id="ai-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+        <h3 class="text-lg font-bold text-stone-800 mb-2" data-i18n="playAi">Play with AI</h3>
+        <p class="text-sm text-stone-500 mb-6">Choose your side. (Rain V3.4 Hybrid)</p>
+        <div class="flex flex-col gap-3">
+            <button onclick="startAiGame(WHITE)" class="w-full py-3 bg-stone-800 text-white rounded-lg hover:bg-stone-700 transition font-bold flex items-center justify-center gap-2"><div class="w-3 h-3 rounded-full bg-white"></div> <span data-i18n="youBlack">You as Black</span></button>
+            <button onclick="startAiGame(BLACK)" class="w-full py-3 bg-white border border-stone-200 text-stone-800 rounded-lg hover:bg-stone-50 transition font-bold flex items-center justify-center gap-2"><div class="w-3 h-3 rounded-full bg-black"></div> <span data-i18n="youWhite">You as White</span></button>
+            <button onclick="startAiGame('BOTH')" class="w-full py-3 bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-200 transition font-bold flex items-center justify-center gap-2"><i class="ph ph-robot"></i> <span data-i18n="aiSelf">AI Selfplay</span></button>
+        </div>
+        <button onclick="document.getElementById('ai-modal').classList.add('hidden')" class="mt-4 text-xs text-stone-400 hover:text-stone-600" data-i18n="cancel">Cancel</button>
+    </div>
+</div>
+
+<script>
+    const EMPTY = 0; const BLACK = 1; const WHITE = 2; const SIZE = 8;
+    // 8 directions (main thread): avoid per-call allocations in flippable calc
+    const DIR8_R = new Int8Array([-1,-1,-1,0,0,1,1,1]);
+    const DIR8_C = new Int8Array([-1,0,1,-1,1,-1,0,1]);
+
+    window.EMPTY = EMPTY; window.BLACK = BLACK; window.WHITE = WHITE; 
+
+    // CI/Playwright self-check mode is enabled via `?selfcheck=1`.
+    // In this mode we expose a few internal state variables on `window` so
+    // the self-check harness can drive the UI and verify engine behavior.
+    const __SONETTO_SELF_CHECK__ = (() => {
+      try { return new URL(location.href).searchParams.get('selfcheck') === '1'; } catch (_) { return false; }
+    })();
+
+    // Global handle for Egaroucid .egbk3 opening book (loaded asynchronously).
+    // The book is intentionally kept on the main thread (no WASM ABI changes).
+    window.__EGBK3_BOOK__ = null;
+    window.__EGBK3_BOOK_PROMISE__ = null;
+    window.__EGBK3_BOOK_ERROR__ = null;
+    
+    /* --- CONFIG START --- */
+let UserConfig = {
+    midDepth: 9,
+    endStart: 18,
+    hashSize: 8,
+    bookRandom: 0,
+    useBook: true,
+    // Phase 4: backend selection (0=Sonetto/Searcher, 1=SenseiAlphaBeta)
+    backend: 0
+};
+/* --- CONFIG END --- */
+
+    if (__SONETTO_SELF_CHECK__) {
+      try {
+        // Provide a live binding so the harness can tweak settings (no separate shadow object).
+        Object.defineProperty(window, 'UserConfig', {
+          get: () => UserConfig,
+          set: (v) => { UserConfig = v; },
+          configurable: true,
+        });
+      } catch (_) {}
+    }
+
+    
+    let gameHistory = []; let currentStepIndex = 0; 
+    let isAnalysisMode = false; let aiSide = null; let isAiThinking = false;
+    let isEditMode = false; let editBrush = BLACK; let isDragging = false;
+    const DEFAULT_GAME = "";
+    let analysisDebounceTimer = null; 
+    let configDebounceTimer = null;
+
+    if (__SONETTO_SELF_CHECK__) {
+      try {
+        Object.defineProperty(window, 'gameHistory', { get: () => gameHistory, configurable: true });
+        Object.defineProperty(window, 'currentStepIndex', { get: () => currentStepIndex, configurable: true });
+      } catch (_) {}
+    }
+
+    /// 会话令牌（用于取消旧回调）
+let AI_SESSION_TOKEN = 0;
+let AI_TIMER_IDS = new Set();
+
+function bumpAiSession() {
+  AI_SESSION_TOKEN++;
+  for (const id of AI_TIMER_IDS) clearTimeout(id);
+  AI_TIMER_IDS.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Asset loading helpers (gzip-aware)
+//
+// We keep large assets (eval.egev2 / book.egbk3) as .gz to fit Pages' per-file
+// size limit (25 MiB) and decompress in-browser.
+// - Primary path: native DecompressionStream('gzip')
+// - Fallback: fflate (loaded locally from ./vendor/fflate.umd.js)
+// ---------------------------------------------------------------------------
+
+function sonettoGetQueryParam(key) {
+  try {
+    const u = new URL(location.href);
+    return u.searchParams.get(key);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function sonettoFetchArrayBuffer(url, cacheMode = 'force-cache') {
+  const res = await fetch(url, { cache: cacheMode });
+  if (!res.ok) throw new Error(`fetch failed: ${url} (${res.status})`);
+  return await res.arrayBuffer();
+}
+
+async function sonettoFetchArrayBufferGzip(url, cacheMode = 'force-cache') {
+  const res = await fetch(url, { cache: cacheMode });
+  if (!res.ok) throw new Error(`fetch failed: ${url} (${res.status})`);
+
+  // Stream-based native gzip decompression (preferred).
+  if (typeof DecompressionStream !== 'undefined' && res.body) {
+    const ds = new DecompressionStream('gzip');
+    const outStream = res.body.pipeThrough(ds);
+    return await new Response(outStream).arrayBuffer();
+  }
+
+  // Fallback: fflate gunzip.
+  const u8 = new Uint8Array(await res.arrayBuffer());
+  if (typeof fflate !== 'undefined' && fflate && typeof fflate.gunzipSync === 'function') {
+    const out = fflate.gunzipSync(u8);
+    return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength);
+  }
+
+  throw new Error('gzip decompression not supported in this browser (no DecompressionStream, no fflate)');
+}
+
+async function sonettoLoadAssetsConfig() {
+  const defaults = {
+    weights: { url: './eval.egev2.gz', compression: 'gzip' },
+    book: { url: './book.egbk3.gz', compression: 'gzip' },
+  };
+
+  // Optional overrides via query params (handy for testing):
+  //   ?weights=...&book=...
+  const qpW = sonettoGetQueryParam('weights');
+  const qpB = sonettoGetQueryParam('book');
+  if (qpW) defaults.weights.url = qpW;
+  if (qpB) defaults.book.url = qpB;
+
+  try {
+    const res = await fetch('./sonetto_assets.json', { cache: 'no-store' });
+    if (!res.ok) return defaults;
+    const cfg = await res.json();
+    return {
+      weights: Object.assign({}, defaults.weights, (cfg && cfg.weights) ? cfg.weights : null),
+      book: Object.assign({}, defaults.book, (cfg && cfg.book) ? cfg.book : null),
+    };
+  } catch (_) {
+    return defaults;
+  }
+}
+
+async function sonettoAutoLoadWeights(setLoading) {
+  if (typeof window === 'undefined') return null;
+  if (window.__SONETTO_EGEV2_BYTES__) return window.__SONETTO_EGEV2_BYTES__;
+
+  const cfg = await sonettoLoadAssetsConfig();
+  const urls = [
+    cfg?.weights?.url,
+    './eval.egev2.gz',
+    './assets/eval.egev2.gz',
+    './eval.egev2',
+    './assets/eval.egev2',
+  ].filter(Boolean);
+
+  let lastErr = null;
+  for (const url of urls) {
+    try {
+      if (typeof setLoading === 'function') setLoading(50, 'Loading weights...');
+      const ab = (cfg?.weights?.compression === 'gzip' || String(url).endsWith('.gz'))
+        ? await sonettoFetchArrayBufferGzip(url)
+        : await sonettoFetchArrayBuffer(url);
+      const u8 = new Uint8Array(ab);
+
+      // Mirror the importWeightsZip() path.
+      window.__SONETTO_EGEV2_BYTES__ = u8;
+      window.__SONETTO_WEIGHTS_FLAT__ = null;
+      if (typeof AnalysisManager !== 'undefined' && AnalysisManager && AnalysisManager.workers && AnalysisManager.workers.length) {
+        const hashSizeMb = (parseInt((UserConfig && UserConfig.hashSize) || '8', 10) || 8);
+        AnalysisManager.workers.forEach(w => w.postMessage({ type: 'set_weights_egev2', hashSizeMb, evalEgev2Bytes: u8 }));
+      }
+      return u8;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
+  console.warn('[Sonetto] Auto weights load failed. You can still use “Import Weights”.', lastErr);
+  return null;
+}
+
+// --- Egaroucid .egbk3 opening book loader (async, main-thread) ---
+// This starts in bootSonetto() and completes in the background.
+// AnalysisManager probes `window.__EGBK3_BOOK__` when ready.
+async function startEgbk3BookLoad() {
+  if (typeof window === 'undefined') return null;
+  if (window.__EGBK3_BOOK_PROMISE__) return window.__EGBK3_BOOK_PROMISE__;
+  if (typeof Egbk3Book === 'undefined') {
+    window.__EGBK3_BOOK_ERROR__ = new Error('Egbk3Book is not loaded (missing egbk3_book.js?)');
+    return null;
+  }
+
+  window.__EGBK3_BOOK_PROMISE__ = (async () => {
+    try {
+      // Keep UI responsive: Egbk3Book internally yields while indexing.
+      const bumpLoading = (pct) => {
+        try {
+          const bar = document.getElementById('loading-bar');
+          const cur = (bar && typeof bar.style.width === 'string') ? (parseInt(bar.style.width) || 0) : 0;
+          updateLoadingProgress(Math.max(cur, pct | 0), 'loadingBook');
+        } catch (_) {}
+      };
+
+      bumpLoading(25);
+
+      const cfg = await sonettoLoadAssetsConfig();
+      const urls = [
+        cfg?.book?.url,
+        './book.egbk3.gz',
+        './assets/book.egbk3.gz',
+        './book.egbk3',
+        './assets/book.egbk3',
+      ].filter(Boolean);
+
+      let book = null;
+      let lastErr = null;
+      for (const url of urls) {
+        try {
+          if ((cfg?.book?.compression === 'gzip') || String(url).endsWith('.gz')) {
+            // Gzip path: fetch + decompress, then build index.
+            const ab = await sonettoFetchArrayBufferGzip(url);
+            const b = new Egbk3Book(ab);
+            await b.buildIndex({
+              onProgress: (phase, ratio) => {
+                const r = Math.max(0, Math.min(1, Number(ratio) || 0));
+                bumpLoading(25 + Math.round(10 * r));
+              }
+            });
+            book = b;
+          } else {
+            // Plain file path.
+            book = await Egbk3Book.loadFromUrl(url, {
+              onProgress: (phase, ratio) => {
+                const r = Math.max(0, Math.min(1, Number(ratio) || 0));
+                bumpLoading(25 + Math.round(10 * r));
+              }
+            });
+          }
+          break;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+
+      if (!book) throw (lastErr || new Error('book not found'));
+
+      window.__EGBK3_BOOK__ = book;
+      return book;
+    } catch (err) {
+      console.warn('Failed to auto-load opening book; opening book disabled.', err);
+      window.__EGBK3_BOOK_ERROR__ = err;
+      window.__EGBK3_BOOK__ = null;
+      return null;
+    }
+  })();
+
+  return window.__EGBK3_BOOK_PROMISE__;
+}
+
+    
+    const TRANSLATIONS = {
+        en: {
+                    subtitle: "Adaptive Parallel Engine",
+                    legal: "Legal",
+                    editMode: "Edit Mode",
+                    done: "Done",
+                    black: "Black",
+                    white: "White",
+                    editBoard: "Edit Board",
+                    coreSettings: "Core Settings",
+                    midDepth: "Mid Depth",
+                    endStart: "Endgame Start",
+                    hashSize: "Hash Size (MB)",
+                    bookRand: "Book Accuracy Level (0-10)",
+                    useBook: "Use Opening Book",
+                    saveDefault: "Set Default",
+                    aiEvolution: "AI Evolution",
+                    clear: "Clear",
+                    loadGame: "Load Game",
+                    analyzeOff: "Analysis: OFF",
+                    analyzeOn: "Analysis: ON",
+                    playAi: "Play with AI",
+                    whoseTurn: "Whose Turn?",
+                    youBlack: "You as Black",
+                    youWhite: "You as White",
+        aiSelf: "AI Selfplay",
+                    cancel: "Cancel",
+                    importWeights: "Import Weights",
+                    exportWeights: "Export Weights",
+                    exportRunnable: "Runnable ZIP",
+                    evolutionTitle: "Evolution:",
+                    evolutionDesc: "Save weights & settings.",
+                    loadingInitializing: "Initializing...",
+                    loadingConfig: "Loading config...",
+                    loadingDecoding: "Decoding data (please wait)...",
+                    loadingBuilding: "Building UI...",
+                    loadingBook: "Loading opening book...",
+                    stop: "Stop",
+                    stoneUnit: "st",
+                },
+                zh: {
+                    subtitle: "自适应并行引擎",
+                    legal: "显示落子",
+                    editMode: "编辑模式",
+                    done: "完成",
+                    black: "黑方",
+                    white: "白方",
+                    editBoard: "编辑棋盘",
+                    coreSettings: "核心设置",
+                    midDepth: "中盘搜索深度",
+                    endStart: "尾盘算杀起点",
+                    hashSize: "Hash 内存 (MB)",
+                    bookRand: "开局准确度等级 (0-10)",
+                    useBook: "启用开局库",
+                    saveDefault: "设为默认",
+                    aiEvolution: "AI 进化室",
+                    clear: "清空",
+                    loadGame: "载入棋局",
+                    analyzeOff: "分析模式: 关闭",
+                    analyzeOn: "分析模式: 开启",
+                    playAi: "人机对弈",
+                    whoseTurn: "轮到谁走?",
+                    youBlack: "执黑 (先手)",
+                    youWhite: "执白 (后手)",
+                    aiSelf: "AI 自我对弈",
+                    cancel: "取消",
+                    importWeights: "导入权重包",
+                    exportWeights: "导出权重包",
+                    exportRunnable: "可运行包ZIP",
+                    evolutionTitle: "进化：",
+                    evolutionDesc: "保存权重与设置。",
+                    loadingInitializing: "正在初始化...",
+                    loadingConfig: "读取配置...",
+                    loadingDecoding: "解析数据（请稍候）...",
+                    loadingBuilding: "构建界面...",
+                    loadingBook: "加载开局库...",
+                    stop: "停止",
+                    stoneUnit: "子",
+                }    };
+
+    function getLang() {
+  return document.getElementById('lang-select')?.value || 'en';
+}
+
+function i18n(key) {
+  const lang = getLang();
+  const dict = TRANSLATIONS[lang] || TRANSLATIONS.en;
+  return (dict && dict[key]) || (TRANSLATIONS.en && TRANSLATIONS.en[key]) || key;
+}
+
+function applyI18n() {
+  const lang = getLang();
+  const dict = TRANSLATIONS[lang] || TRANSLATIONS.en;
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.getAttribute('data-i18n');
+    if (dict && dict[key]) el.textContent = dict[key];
+    else if (TRANSLATIONS.en && TRANSLATIONS.en[key]) el.textContent = TRANSLATIONS.en[key];
+  });
+}
+
+function changeLanguage(lang) {
+  if (!TRANSLATIONS[lang]) return;
+  const sel = document.getElementById('lang-select');
+  if (sel) sel.value = lang;
+  try { localStorage.setItem('Sonetto_lang', lang); } catch (_) {}
+
+  applyI18n();
+
+  // Let updateStopButton decide Analyze/AI button labels.
+  const isBusy = (typeof AnalysisManager !== 'undefined' && AnalysisManager && AnalysisManager.isBusy);
+  updateStopButton(!!isBusy);
+}
+
+
+// --- WASM ENGINE ---
+// Engine computation is delegated to a dedicated module worker (./engine_worker.js)
+// which loads the Rust-compiled WASM engine from ./pkg/sonetto_wasm.js.
+const workerScript = ""; // legacy placeholder (kept to avoid breaking old export templates)
+
+const AnalysisManager = {
+    workers: [],
+    results: [],
+    queue: [],
+    isBusy: false,
+    currentPhase: 'IDLE',
+    targetStepIndex: -1,
+    currentAnalysisId: 0,
+    poolSize: null,
+    // --- Top-N policy ---
+    // Analysis mode (manual "Analyze"): show Top-4 (A/B/C/D) for a cleaner UI.
+    // AI play ("Play with AI"): search **Top-1** only (best move) for maximum speed.
+    analysisTopN: 4,
+    aiTopN: 1,
+    deepenTopN: 4,
+    // When true, non-AI analysis finishes after Top-N deepening (skip REST pass).
+    analysisTopOnly: true,
+    // Internal per-run flags (set in startAnalysis)
+    _activeTopN: 4,
+    _analysisFinishAfterTopN: false,
+    
+    // 软取消方法
+    cancelCurrentAnalysis: function(hard = false) {
+    this.currentAnalysisId++;
+    this.isBusy = false;
+    this.currentPhase = 'IDLE';
+    this.queue = [];
+    this.results = [];
+    this.preScanResults = [];
+    this.top4Results = [];
+    if (this._bgJobs) this._bgJobs.clear();
+    // Reset per-run flags (defensive)
+    this._analysisFinishAfterTopN = false;
+    this._activeTopN = (this.analysisTopN || 4);
+    this.busyWorkers.clear(); // 释放所有 worker 忙碌标记
+
+    // Hard cancel: rebuild the worker pool.
+    if (hard) {
+        const keepCount = (this.workers && this.workers.length) ? this.workers.length
+            : (this.poolSize || (navigator.hardwareConcurrency || 4));
+
+        this.terminate();
+        this.init(Math.max(1, keepCount));
+    }
+
+    updateStatusUI('IDLE', 'Cancelled');
+    updateStopButton(false);
+},
+
+    blobUrl: null,
+    lastKnownWeights: null,
+    _exportReqCounter: 0,
+    _exportRequests: new Map(),
+    // Book background evaluation jobs (used to print non-book Top-(N-book) values).
+    _bgReqCounter: 0,
+    _bgJobs: new Map(),
+    lastGenerations: 0,
+    currentHistory: "",
+    allMoves: [],
+    preScanResults: [],
+    top4Results: [],
+    board: null,
+    player: null,
+    fullDepth: 8,
+    halfDepth: 4,
+    mode: 'hybrid',
+    isAiCalculation: false,
+    _rr: 0,
+    _weightsBroadcastGen: 0,
+
+    _npsByWorker: new Map(),
+broadcastWeightsToAll: function() {
+  if (!this.workers || this.workers.length === 0) return;
+  const hashSizeMb = (parseInt(UserConfig.hashSize) || 8);
+
+  // Prefer canonical Egaroucid weights blob when present.
+  const evalSrc = (typeof window !== 'undefined') ? (window.__SONETTO_EGEV2_BYTES__ || null) : null;
+  if (evalSrc) {
+    const evalEgev2Bytes = (evalSrc instanceof Uint8Array) ? evalSrc : new Uint8Array(evalSrc);
+    this.workers.forEach(w => w.postMessage({ type: 'set_weights_egev2', hashSizeMb, evalEgev2Bytes }));
+    return;
+  }
+
+  // Fallback legacy path: flat f32
+  if (!this.lastKnownWeights) return;
+  const weightsFlat = (this.lastKnownWeights instanceof Float32Array)
+    ? this.lastKnownWeights
+    : Array.isArray(this.lastKnownWeights)
+      ? new Float32Array(this.lastKnownWeights)
+      : (this.lastKnownWeights && this.lastKnownWeights.buffer && this.lastKnownWeights.BYTES_PER_ELEMENT === 4)
+        ? new Float32Array(this.lastKnownWeights)
+        : null;
+  if (!weightsFlat) return;
+  this.workers.forEach(w => w.postMessage({ type: 'set_weights', hashSizeMb, weightsFlat }));
+},
+
+    requestWeightsEgev2: function() {
+      if (!this.workers || this.workers.length === 0) {
+        this.init(1);
+      }
+      const reqId = ++this._exportReqCounter;
+      return new Promise((resolve, reject) => {
+        this._exportRequests.set(reqId, { resolve, reject });
+        try {
+          this.workers[0].postMessage({ type: 'get_weights_egev2', reqId });
+        } catch (e) {
+          this._exportRequests.delete(reqId);
+          reject(e);
+        }
+      });
+    },
+
+    setWeightsFlat: async function(weightsFlat) {
+      if (!(weightsFlat instanceof Float32Array)) {
+        if (Array.isArray(weightsFlat)) weightsFlat = new Float32Array(weightsFlat);
+        else throw new Error('setWeightsFlat expects Float32Array or number[]');
+      }
+      this.lastKnownWeights = weightsFlat;
+      const hashSizeMb = (parseInt(UserConfig.hashSize) || 8);
+      if (!this.workers || this.workers.length === 0) return;
+      this.workers.forEach(w => {
+        w.postMessage({ type: 'set_weights', hashSizeMb, weightsFlat });
+      });
+    },
+
+
+    init: function(workerCountOverride = null) {
+        this.terminate();
+        if (this._npsByWorker) this._npsByWorker.clear();
+        // WASM inference-only worker pool.
+        const hw = navigator.hardwareConcurrency || 4;
+        // WASM engine is synchronous; creating many workers would multiply WASM init/memory cost.
+        // Default to a single worker unless explicitly overridden.
+        let count = (typeof workerCountOverride === 'number' && workerCountOverride > 0)
+            ? Math.floor(workerCountOverride)
+            : 1;
+        this.poolSize = count; // 记住当前池规模 
+
+        // WASM engine uses external module worker (./engine_worker.js); no inline blob needed.
+
+
+        // Opening book (Egaroucid .egbk3) is loaded asynchronously (see bootSonetto).
+        // No legacy base64-inline book is used in this build.
+
+        for (let i = 0; i < count; i++) {
+            const w = new Worker('./engine_worker.js', { type: 'module' });
+            w.onmessage = (e) => this.handleWorkerMessage(e.data, w);
+            w.onerror = (e) => {
+                // In some browsers / cross-origin failure modes, `ErrorEvent.message` can be empty/undefined.
+                // Surface as much context as possible to avoid the unhelpful: "Worker crashed: undefined".
+                const msg = (e && (e.message || (e.error && e.error.message))) ? (e.message || e.error.message) : (e && e.type ? String(e.type) : 'unknown');
+                const where = (e && e.filename) ? ` at ${e.filename}:${e.lineno ?? '?'}:${e.colno ?? '?'}` : '';
+                console.error("Worker crashed:", `${msg}${where}`);
+                if (e && e.error) console.error(e.error);
+                this.isBusy = false;
+                updateStatusUI('IDLE', 'Engine Error');
+                if (e && typeof e.preventDefault === 'function') e.preventDefault();
+            };
+            w.onmessageerror = (e) => {
+                console.error("Worker message error:", e);
+            };
+
+// Init WASM engine instance inside worker.
+// If the build supports wasm threads (rayon + SharedArrayBuffer), the worker will
+// initialize its internal threadpool using this hint (clamped internally).
+const __hwThreads = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency)
+  ? (navigator.hardwareConcurrency | 0)
+  : 4;
+w.postMessage({ type: 'init', hashSizeMb: (parseInt(UserConfig.hashSize) || 8), threadCount: __hwThreads });
+
+// Phase 4: select backend (0=Sonetto/Searcher, 1=SenseiAlphaBeta).
+try {
+    const backend = (parseInt(UserConfig.backend, 10) | 0);
+    w.postMessage({ type: 'set_backend', hashSizeMb: (parseInt(UserConfig.hashSize) || 8), backend: (backend === 1 ? 1 : 0) });
+} catch (_) {}
+
+// Optional: set weights if the page provides a flat weight array.
+// Expected shape: Float32Array or number[].
+const weightsFlatSrc = (typeof window !== 'undefined') ? (window.__SONETTO_WEIGHTS_FLAT__ || null) : null;
+if (weightsFlatSrc && (Array.isArray(weightsFlatSrc) || weightsFlatSrc instanceof Float32Array)) {
+    const weightsFlat = (weightsFlatSrc instanceof Float32Array) ? weightsFlatSrc : new Float32Array(weightsFlatSrc);
+    // NOTE: don't transfer the buffer here (transfer would detach it and break reuse / multi-worker).
+    w.postMessage({ type: 'set_weights', hashSizeMb: (parseInt(UserConfig.hashSize) || 8), weightsFlat });
+}
+
+// Optional: set weights from canonical eval.egev2 bytes.
+// Expected shape: Uint8Array or ArrayBuffer.
+// If both are provided, eval.egev2 wins.
+const egev2Src = (typeof window !== 'undefined') ? (window.__SONETTO_EGEV2_BYTES__ || null) : null;
+if (egev2Src && (egev2Src instanceof Uint8Array || egev2Src instanceof ArrayBuffer)) {
+    const evalEgev2Bytes = (egev2Src instanceof Uint8Array) ? egev2Src : new Uint8Array(egev2Src);
+    // NOTE: don't transfer the buffer here (transfer would detach it and break reuse / multi-worker).
+    w.postMessage({ type: 'set_weights_egev2', hashSizeMb: (parseInt(UserConfig.hashSize) || 8), evalEgev2Bytes });
+}
+
+this.workers.push(w);
+        }
+
+        console.log(`AnalysisManager initialized with ${count} workers.`);
+    },
+
+    terminate: function() {
+        this.workers.forEach(w => w.terminate());
+        this.workers = [];
+        if (this._npsByWorker) this._npsByWorker.clear();
+        if (this.busyWorkers) this.busyWorkers.clear(); 
+        if (this._bgJobs) this._bgJobs.clear();
+        this.isBusy = false;
+        this.currentPhase = 'IDLE';
+        updateStatusUI('IDLE');
+        // no blobUrl in WASM worker build
+    },
+
+    getAvailableWorkersForAnalysis: function() {
+        return (this.workers && this.workers.length) ? this.workers : [];
+    },
+
+    
+startAnalysis: function(board, player, validMoves, onComplete = null, isAi = false) {
+    // WASM engine integration (Top-N numeric move evaluations).
+    // - Midgame: depth-limited search (UserConfig.midDepth)
+    // - Endgame: exact solver when empties <= UserConfig.endStart
+    // NOTE: Analysis uses Top-4 for a cleaner UI; AI uses Top-1 for speed.
+
+    if (this.workers.length === 0) {
+        this.init(1);
+    }
+    if (this.workers.length === 0) {
+        this.isBusy = false;
+        this.currentPhase = 'IDLE';
+        updateStatusUI('IDLE', 'Engine not ready');
+        updateStopButton(false);
+        return;
+    }
+
+    const w = this.workers[0];
+    this.busyWorkers.clear();
+
+    this.isAiCalculation = !!isAi;
+    this.targetStepIndex = currentStepIndex;
+    this.currentAnalysisId++;
+    const reqId = this.currentAnalysisId;
+
+    // Any stale book background jobs are no longer relevant once we start a new analysis.
+    if (this._bgJobs) this._bgJobs.clear();
+
+    this.isBusy = true;
+    this.board = board;
+    this.player = player;
+    this.onAnalysisComplete = onComplete;
+
+    const moves = Array.isArray(validMoves) ? validMoves : [];
+    if (moves.length === 0) {
+        this.isBusy = false;
+        this.currentPhase = 'IDLE';
+        updateStatusUI('IDLE', 'No legal moves');
+        updateStopButton(false);
+        return;
+    }
+
+    // Select Top-N based on caller: analysis uses Top-4, AI uses Top-1 (best move only).
+
+
+    const topN = Math.max(1, Math.min(32, this.isAiCalculation ? (this.aiTopN || 1) : (this.analysisTopN || 4)));
+
+
+    this._activeTopN = topN;
+
+
+    this._analysisFinishAfterTopN = (!this.isAiCalculation) && !!this.analysisTopOnly;
+// Opening book (optional): Egaroucid .egbk3 (board-keyed) on main thread.
+    // - Analysis mode: deterministic move list (no randomness).
+    // - AI mode: uses get_random(acc_level) and returns a *single* move so AI truly follows it.
+    const stepState = gameHistory[currentStepIndex];
+    const egbk3 = (typeof window !== 'undefined') ? (window.__EGBK3_BOOK__ || null) : null;
+    const accLevel = Math.max(0, Math.min(10, parseInt(UserConfig.bookRandom) || 0));
+
+    if (UserConfig.useBook && egbk3 && egbk3.ready) {
+        let bookResults = null;
+
+        if (this.isAiCalculation) {
+            const chosen = egbk3.getRandomMove(board, player, moves, accLevel);
+            if (chosen) {
+                // Critical: return only one move so the downstream "max val" selection cannot override randomness.
+                bookResults = [chosen];
+            }
+        } else {
+            // Deterministic: no randomness in analysis mode.
+            const res = egbk3.getMoveValues(board, player, moves);
+            if (Array.isArray(res) && res.length > 0) {
+                bookResults = res;
+            }
+        }
+
+        if (bookResults) {
+            // UI policy:
+            // - When we're inside book scope, ONLY display book values.
+            // - Still evaluate the remaining (TopN - bookDisplayed) moves via engine
+            //   and print them to console for debugging / comparison.
+            const bookDisplay = Array.isArray(bookResults) ? bookResults.slice(0, topN) : [];
+
+            this.results = bookDisplay;
+            this.isBusy = false;
+            this.currentPhase = 'IDLE';
+
+            updateEngineText('Book (egbk3)', 'text-emerald-600 font-bold');
+            updateStatusUI('DONE', 'Book move');
+            updateStopButton(false);
+            updateAnalysisUI(bookDisplay, 'book');
+            updateAnalysisText(bookDisplay, 'book');
+
+            // Background: evaluate the remaining (TopN - book) slots and PRINT.
+            // Skip for AI mode (AI follows the book move deterministically/randomly).
+            if (!this.isAiCalculation) {
+                const need = Math.max(0, topN - bookDisplay.length);
+                if (need > 0) {
+                    const keySet = new Set();
+                    for (const r of bookResults) {
+                        if (!r) continue;
+                        keySet.add(`${r.x},${r.y}`);
+                    }
+
+                    const bgMidDepth = Math.max(1, Math.min(255, parseInt(UserConfig.midDepth) || 8));
+                    const bgEndStart = Math.max(0, Math.min(64, parseInt(UserConfig.endStart) || 14));
+                    const bgTopN = Math.min(32, topN + Math.min(bookResults.length, topN));
+
+                    // Defer a tick so immediate user actions (move / stop) can preempt.
+                    const stepIdx = currentStepIndex;
+                    const self = this;
+                    setTimeout(() => {
+                        // Only if we are still on the same step and not running a foreground analysis.
+                        if (currentStepIndex !== stepIdx) return;
+                        if (self.isBusy) return;
+
+                        const bgReqId = 100000000 + (++self._bgReqCounter);
+                        if (self._bgJobs) {
+                            self._bgJobs.set(bgReqId, {
+                                stepIndex: stepIdx,
+                                need,
+                                bookKeys: keySet,
+                                topN,
+                                bookDisplay,
+                            });
+                        }
+
+                        const boardArrBg = boardToPackedArray(board);
+                        self.busyWorkers.add(w);
+                        w.postMessage(
+                            {
+                                type: 'analyze',
+                                boardArr: boardArrBg,
+                                player: player,
+                                midDepth: bgMidDepth,
+                                endStart: bgEndStart,
+                                topN: bgTopN,
+                                reqId: bgReqId,
+                                tag: 'book_bg'
+                            },
+                            [boardArrBg.buffer]
+                        );
+                    }, 0);
+                }
+            }
+
+            if (this.onAnalysisComplete) {
+                const cb = this.onAnalysisComplete;
+                this.onAnalysisComplete = null;
+                cb(bookDisplay);
+            }
+            return;
+        }
+    }
+
+    // WASM engine path (midgame / endgame switch)
+    const midDepth = Math.max(1, Math.min(255, parseInt(UserConfig.midDepth) || 8));
+    const endStart = Math.max(0, Math.min(64, parseInt(UserConfig.endStart) || 14));
+
+    let empties = 0;
+    try {
+        const c = countDiscs(board);
+        empties = 64 - ((c?.b || 0) + (c?.w || 0));
+    } catch (_) {
+        empties = 64;
+    }
+
+    // Keep UI mode switch consistent with the Rust engine guard:
+    // exact solver is used only when (empties <= endStart && empties <= 30).
+    const useExact = (empties <= endStart && empties <= 30);
+    const mode = useExact ? 'endgame' : 'midgame';
+    this._lastAnalysisMode = mode;
+
+    if (mode === 'endgame') {
+        updateEngineText(`Endgame (<=${endStart}E): Exact`, 'text-rose-600 font-bold');
+    } else {
+        updateEngineText(`Midgame (d${midDepth})`, 'text-indigo-600');
+    }
+
+    updateStatusUI('WORKING', this.isAiCalculation ? 'AI Thinking...' : 'Analyzing...');
+    updateStopButton(true);
+
+    const boardArr = boardToPackedArray(board);
+    this.busyWorkers.add(w);
+    w.postMessage({ type: 'analyze', boardArr, player: player, midDepth, endStart, topN, reqId }, [boardArr.buffer]);
+},
+
+    transitionToTop4: function() {
+        if (this.targetStepIndex !== currentStepIndex) return;
+
+        const countToDeepen = Math.min(this.deepenTopN || 6, this.preScanResults.length);
+        let fullD = parseInt(UserConfig.midDepth);
+        
+        updateStatusUI('WORKING', `Deepening Best Move (Depth ${fullD})...`);
+
+        this.preScanResults.sort((a, b) => b.val - a.val);
+        const topCandidates = this.preScanResults.slice(0, countToDeepen);
+
+        this.top4Results = [];
+        this.queue = [];
+
+        topCandidates.forEach(r => {
+            this.queue.push({
+                board: this.board,
+                player: this.player,
+                move: { x: r.x, y: r.y },
+                mode: 'hybrid',
+                depth: fullD,
+                alpha: -Infinity,
+                reqId: this.currentAnalysisId,
+                history: this.currentHistory,
+                config: UserConfig
+            });
+        });
+
+        this.currentPhase = 'TOP4';
+        this.dispatch();
+    },
+
+    transitionToRest: function() {
+        if (this.targetStepIndex !== currentStepIndex) return;
+
+        const countDone = this.top4Results.length;
+        if (this.allMoves.length <= countDone) {
+            this.finishAnalysis();
+            return;
+        }
+
+        updateStatusUI('WORKING', `Checking Alternatives...`);
+
+        let fullD = parseInt(UserConfig.midDepth);
+        
+        let alphaThreshold = -Infinity;
+        if (this.isAiCalculation && this.top4Results.length > 0) {
+            let sorted = [...this.top4Results].sort((a, b) => b.val - a.val);
+            alphaThreshold = sorted[0].val;
+        }
+
+        const restCandidates = this.preScanResults.slice(countDone);
+        this.queue = [];
+
+        restCandidates.forEach(r => {
+            this.queue.push({
+                board: this.board,
+                player: this.player,
+                move: { x: r.x, y: r.y },
+                mode: 'hybrid',
+                depth: fullD,
+                alpha: alphaThreshold, 
+                beta: Infinity,
+                reqId: this.currentAnalysisId,
+                history: this.currentHistory,
+                config: UserConfig
+            });
+        });
+
+        this.currentPhase = 'REST';
+        this.dispatch();
+    },
+
+    finishAnalysis: function() {
+        if (!this.isBusy) return;
+        if (this.targetStepIndex !== currentStepIndex) return;
+
+        this.isBusy = false;
+        this.currentPhase = 'IDLE';
+
+        updateStatusUI('DONE', 'Finished Calculation');
+        updateStopButton(false);
+
+        if (this.onAnalysisComplete) {
+            const callback = this.onAnalysisComplete;
+            this.onAnalysisComplete = null;
+            callback(this.results);
+        }
+    },
+
+// 每个 worker 同时最多跑 1 个任务，避免消息队列塞爆导致 Stop/换步仍长时间满载
+busyWorkers: new Set(),
+
+handleWorkerMessage: function(data, worker) {
+    const { type } = data;
+
+    const release = () => {
+        if (worker && this.busyWorkers) this.busyWorkers.delete(worker);
+    };
+
+// --- WASM engine messages ---
+	if (type === 'inited') {
+	    // Worker has loaded WASM and created the engine.
+	    const wi = (data && data.wasmInfo) ? data.wasmInfo : null;
+	    // Expose for smoke tests / debugging.
+	    try {
+	        this.wasmInfo = wi;
+	        window.__SONETTO_WASM_INFO__ = wi;
+	    } catch (_) {}
+	    let label = 'Engine: Ready (WASM)';
+	    let cls = 'text-stone-400';
+	    if (wi && wi.threads && wi.threadsUsed && wi.threadsUsed > 1) {
+	        label = `Engine: Ready (WASM Threads x${wi.threadsUsed})`;
+	        cls = 'text-emerald-600 font-bold';
+	    } else if (wi && wi.threads) {
+	        // Thread build detected, but the pool could not be started (missing COOP/COEP,
+	        // no SharedArrayBuffer, or build artifacts missing).
+	        label = 'Engine: Ready (WASM Threads: unavailable)';
+	        cls = 'text-amber-600 font-bold';
+	    } else if (wi && wi.simd) {
+	        label = 'Engine: Ready (WASM SIMD)';
+	        cls = 'text-indigo-600';
+	    }
+	    updateEngineText(label, cls);
+	    try {
+	        window.__SONETTO_ENGINE_READY__ = true;
+	        if (typeof window.__SONETTO_HIDE_LOADING__ === 'function') window.__SONETTO_HIDE_LOADING__();
+	    } catch (_) {}
+	    return;
+	}
+
+	if (type === 'get_weights_egev2_result') {
+	    // Reply to AnalysisManager.requestWeightsEgev2().
+	    const reqId = data.reqId;
+	    const entry = this._exportRequests ? this._exportRequests.get(reqId) : null;
+	    if (entry) {
+	        this._exportRequests.delete(reqId);
+	        entry.resolve({ evalEgev2Bytes: data.evalEgev2Bytes });
+	    }
+	    return;
+	}
+
+	if (type === 'analysis') {
+	    release();
+
+	    // Book background jobs: fill missing lines in the UI (book moves + engine eval).
+	    if (data && data.tag === 'book_bg') {
+	        const job = (this._bgJobs && typeof this._bgJobs.get === 'function') ? this._bgJobs.get(data.reqId) : null;
+	        if (this._bgJobs) this._bgJobs.delete(data.reqId);
+	        if (!job) return;
+	        if (job.stepIndex !== currentStepIndex) return;
+
+	        const flat = (data && Array.isArray(data.resultsFlat)) ? data.resultsFlat : [];
+	        const results = [];
+	        for (let i = 0; i + 1 < flat.length; i += 2) {
+	            const m = flat[i] | 0;
+	            const v = flat[i + 1] | 0;
+	            if (m === 255) continue;
+	            const x = (m >> 3) & 7;
+	            const y = m & 7;
+	            results.push({ x, y, val: v, isBookHit: false });
+	        }
+	        results.sort((a, b) => b.val - a.val);
+
+	        const filtered = results.filter(r => !job.bookKeys.has(`${r.x},${r.y}`));
+	        const extra = filtered.slice(0, Math.max(0, job.need | 0));
+
+	        // Merge: keep book values for book moves, and fill the rest with engine eval.
+	        const merged = [];
+	        if (Array.isArray(job.bookDisplay)) {
+	            for (const r of job.bookDisplay) merged.push(r);
+	        }
+	        for (const r of extra) merged.push(r);
+
+	        // Stable sort by value (desc), then coord to keep deterministic UI.
+	        merged.sort((a, b) => (b.val - a.val) || ((a.y - b.y) || (a.x - b.x)));
+
+	        // Respect the active Top-N for this run.
+	        const topN = Math.max(1, Math.min(32, job.topN | 0));
+	        const finalList = merged.slice(0, topN);
+
+	        // Update UI only (do not trigger AI callbacks twice).
+	        try {
+	            this.results = finalList;
+	            updateAnalysisUI(finalList, 'book');
+	            updateAnalysisText(finalList, 'book');
+	        } catch (_) {}
+
+	        // Optional debug print.
+	        try {
+	            console.groupCollapsed(`[Book] Filled Top-${topN} (book + engine eval)`);
+	            console.table(finalList);
+	            console.groupEnd();
+	        } catch (_) {
+	            console.log(`[Book] Filled Top-${topN} (book + engine eval):`, finalList);
+	        }
+	        return;
+	    }
+
+	    if (data.reqId !== this.currentAnalysisId) return;
+	    if (this.targetStepIndex !== currentStepIndex) return;
+
+	    const flat = (data && Array.isArray(data.resultsFlat)) ? data.resultsFlat : [];
+	    const results = [];
+	    for (let i = 0; i + 1 < flat.length; i += 2) {
+	        const m = flat[i] | 0;
+	        const v = flat[i + 1] | 0;
+	        if (m === 255) continue;
+	        const x = (m >> 3) & 7;
+	        const y = m & 7;
+	        results.push({ x, y, val: v, isBookHit: false });
+	    }
+	    // Defensive sort (WASM already returns Top-N sorted)
+	    results.sort((a, b) => b.val - a.val);
+
+	    this.results = results;
+	    this.isBusy = false;
+	    this.currentPhase = 'IDLE';
+
+	    updateStatusUI('DONE', results.length ? 'Analysis ready' : 'No legal moves');
+	    updateStopButton(false);
+
+	    const md = this._lastAnalysisMode || 'midgame';
+	    updateAnalysisUI(results, md);
+	    updateAnalysisText(results, md);
+
+	    // Show NPS (nodes per second) in the stats bar.
+	    const npsEl = document.getElementById('stat-nps');
+	    if (npsEl) {
+	        let nps = null;
+	        if (typeof data.nps === 'number' && Number.isFinite(data.nps)) {
+	            nps = data.nps;
+	        } else if (
+	            typeof data.nodes === 'number' && Number.isFinite(data.nodes) &&
+	            typeof data.ms === 'number' && Number.isFinite(data.ms) &&
+	            data.ms > 0
+	        ) {
+	            nps = (data.nodes * 1000) / data.ms;
+	        }
+	        if (nps !== null) npsEl.textContent = Math.round(nps).toLocaleString();
+	        else npsEl.textContent = '--';
+	    }
+
+	    if (this.onAnalysisComplete) {
+	        const cb = this.onAnalysisComplete;
+	        this.onAnalysisComplete = null;
+	        cb(results);
+	    }
+	    return;
+	}
+
+	// Backward compatibility: older worker may still return best_move
+	if (type === 'best_move') {
+	    release();
+
+	    if (data.reqId !== this.currentAnalysisId) return;
+	    if (this.targetStepIndex !== currentStepIndex) return;
+
+	    const best = (typeof data.best === 'number') ? data.best : 255;
+	    if (best === 255) {
+	        this.isBusy = false;
+	        this.currentPhase = 'IDLE';
+	        updateStatusUI('IDLE', 'No legal moves');
+	        updateStopButton(false);
+	        if (this.onAnalysisComplete) {
+	            const cb = this.onAnalysisComplete;
+	            this.onAnalysisComplete = null;
+	            cb([]);
+	        }
+	        return;
+	    }
+
+	    const x = (best >> 3) & 7;
+	    const y = best & 7;
+	    const results = [{ x, y, val: 0, isBookHit: false }];
+	    this.results = results;
+
+	    this.isBusy = false;
+	    this.currentPhase = 'IDLE';
+
+	    updateStatusUI('DONE', 'Best move ready');
+	    updateStopButton(false);
+	    const md = this._lastAnalysisMode || 'midgame';
+	    updateAnalysisUI(results, md);
+	    updateAnalysisText(results, md);
+
+	    const npsEl = document.getElementById('stat-nps');
+	    if (npsEl) {
+	        let nps = null;
+	        if (typeof data.nps === 'number' && Number.isFinite(data.nps)) {
+	            nps = data.nps;
+	        } else if (
+	            typeof data.nodes === 'number' && Number.isFinite(data.nodes) &&
+	            typeof data.ms === 'number' && Number.isFinite(data.ms) &&
+	            data.ms > 0
+	        ) {
+	            nps = (data.nodes * 1000) / data.ms;
+	        }
+	        if (nps !== null) npsEl.textContent = Math.round(nps).toLocaleString();
+	        else npsEl.textContent = '--';
+	    }
+
+	    if (this.onAnalysisComplete) {
+	        const cb = this.onAnalysisComplete;
+	        this.onAnalysisComplete = null;
+	        cb(results);
+	    }
+	    return;
+	}
+
+	if (type === 'error') {
+	    release();
+	    console.error('WASM worker error:', data && (data.stack || data.message || data));
+	    this.isBusy = false;
+	    this.currentPhase = 'IDLE';
+	    updateStatusUI('IDLE', 'Engine Error');
+	    updateStopButton(false);
+	    try {
+	        // Don't leave the overlay stuck on errors.
+	        if (typeof window.__SONETTO_HIDE_LOADING__ === 'function') window.__SONETTO_HIDE_LOADING__();
+	    } catch (_) {}
+	    alert('WASM engine error: ' + (data && (data.message || data.error || 'Unknown')));
+	    return;
+	}
+
+
+// --- NPS 更新 ---
+    if (type === 'nps_update') {
+        const npsEl = document.getElementById('stat-nps');
+        if (typeof data.val === 'number' && Number.isFinite(data.val)) {
+            if (this._npsByWorker && worker) this._npsByWorker.set(worker, data.val);
+            let total = 0;
+            if (this._npsByWorker) {
+                for (const v of this._npsByWorker.values()) {
+                    if (typeof v === 'number' && Number.isFinite(v)) total += v;
+                }
+            }
+            if (npsEl) npsEl.textContent = total.toLocaleString();
+        }
+        return;
+    }
+
+
+    if (type === 'sorted_moves') {
+        release();
+
+        if (data.reqId !== this.currentAnalysisId) return;
+        if (this.targetStepIndex !== currentStepIndex) return;
+
+        this.allMoves = data.moves;
+        this.queue = [];
+        this.results = [];
+        this.preScanResults = [];
+        this.top4Results = [];
+
+        for (let i = 0; i < data.moves.length; i++) {
+            const m = data.moves[i];
+            this.queue.push({
+                board: data.board,
+                player: data.player,
+                move: { x: m.x, y: m.y },
+                mode: 'endgame',
+                reqId: data.reqId,
+                history: this.currentHistory,
+                config: UserConfig
+            });
+        }
+
+        this.currentPhase = 'ENDGAME_SOLVE';
+        this.dispatch();
+        return;
+    }
+
+    // --- 单步结果 ---
+    if (type === 'result') {
+        release();
+
+        if (data.reqId !== this.currentAnalysisId) return;
+        if (this.targetStepIndex !== currentStepIndex) return;
+
+        const result = { x: data.x, y: data.y, val: data.val, isBookHit: data.isBookHit };
+
+        if (this.currentPhase === 'PRESCAN') {
+            this.preScanResults.push(result);
+            this.dispatch();
+
+            if (this.queue.length === 0 && this.preScanResults.length === this.allMoves.length) {
+                this.transitionToTop4();
+            }
+            return;
+        }
+
+        if (this.currentPhase === 'TOP4') {
+            this.top4Results.push(result);
+            this.results.push(result);
+
+            updateAnalysisUI(this.results, this.mode);
+            updateAnalysisText(this.results, this.mode);
+
+            this.dispatch();
+
+            const need = (this.deepenTopN || 6);
+            const needed = Math.min(need, this.preScanResults.length);
+
+            if (this.top4Results.length >= needed) {
+	                // AI play: finish after Top-N deepening.
+	                // Manual analysis: finish after Top-N deepening when analysisTopOnly=true (skip REST).
+	                if (this.isAiCalculation || this._analysisFinishAfterTopN) this.finishAnalysis();
+	                else this.transitionToRest();
+            }
+            return;
+        }
+
+        if (this.currentPhase === 'REST') {
+            this.results.push(result);
+
+            updateAnalysisUI(this.results, this.mode);
+            updateAnalysisText(this.results, this.mode);
+
+            this.dispatch();
+
+            if (this.queue.length === 0 && this.results.length === this.allMoves.length) {
+                this.finishAnalysis();
+            }
+            return;
+        }
+
+        if (this.currentPhase === 'ENDGAME_SOLVE') {
+            this.results.push(result);
+
+            updateAnalysisUI(this.results, 'endgame');
+            updateAnalysisText(this.results, 'endgame');
+
+            this.dispatch();
+
+            if (this.queue.length === 0 && this.results.length === this.allMoves.length) {
+                this.finishAnalysis();
+            }
+            return;
+        }
+    }
+},
+
+dispatch: function() {
+    const workers = this.getAvailableWorkersForAnalysis();
+    if (!workers || workers.length === 0) return;
+    if (!this.queue || this.queue.length === 0) return;
+    if (!this.isBusy) return;
+
+    // 每个 worker 同时最多 1 个任务：提高 Stop/换步响应，避免塞爆消息队列
+    let progressed = true;
+    while (progressed) {
+        progressed = false;
+        for (let i = 0; i < workers.length && this.queue.length > 0; i++) {
+            const w = workers[(this._rr++) % workers.length];
+            if (this.busyWorkers.has(w)) continue;
+
+            const task = this.queue.shift();
+            this.busyWorkers.add(w);
+            w.postMessage(task);
+            progressed = true;
+        }
+    }
+}
+};
+    let lastRender = 0;
+
+function backendName(v) {
+    const id = (parseInt(v, 10) | 0);
+    return (id === 1) ? 'Sensei (AlphaBeta)' : 'Sonetto (Searcher)';
+}
+
+function applyBackendToWorkers() {
+    try {
+        UserConfig.backend = (parseInt(UserConfig.backend, 10) | 0);
+        if (UserConfig.backend !== 1) UserConfig.backend = 0;
+
+        const el = document.getElementById('val-backend');
+        if (el) el.textContent = backendName(UserConfig.backend);
+
+        const sel = document.getElementById('cfg-backend');
+        if (sel) sel.value = String(UserConfig.backend);
+
+        // Broadcast to workers (no-op if the worker/wasm build doesn't support it).
+        const hashSizeMb = (parseInt(UserConfig.hashSize) || 8);
+        if (typeof AnalysisManager !== 'undefined' && AnalysisManager.workers && AnalysisManager.workers.length) {
+            AnalysisManager.workers.forEach(w => {
+                try { w.postMessage({ type: 'set_backend', hashSizeMb, backend: UserConfig.backend }); } catch (_) {}
+            });
+        }
+    } catch (e) {
+        console.warn('applyBackendToWorkers failed:', e);
+    }
+}
+
+function updateConfigFromUI() {
+    document.getElementById('val-mid-depth').textContent = UserConfig.midDepth;
+    document.getElementById('val-end-start').textContent = UserConfig.endStart + " E";
+    document.getElementById('val-hash-size').textContent = UserConfig.hashSize + " MB";
+    // bookRandom is repurposed as Egaroucid-style acc_level (0..10)
+    document.getElementById('val-book-rand').textContent = String(UserConfig.bookRandom);
+    document.getElementById('txt-end-depth').textContent = UserConfig.endStart;
+    document.getElementById('txt-end-plus-4').textContent = UserConfig.endStart + 4;
+    document.getElementById('txt-mid-depth').textContent = UserConfig.midDepth;
+
+    const backendEl = document.getElementById('val-backend');
+    if (backendEl) backendEl.textContent = backendName(UserConfig.backend);
+
+    if (configDebounceTimer) clearTimeout(configDebounceTimer);
+    configDebounceTimer = setTimeout(() => {
+        // No worker-side config_update in WASM mode; per-request parameters are sent with each analyze call.
+    }, 100);
+}
+
+function updateSettingsUI(fromInteraction = false) {
+    UserConfig.midDepth = parseInt(UserConfig.midDepth) || 9;
+    UserConfig.endStart = parseInt(UserConfig.endStart) || 18;
+    UserConfig.hashSize = parseInt(UserConfig.hashSize) || 8;
+    // bookRandom is used as opening-book acc_level (0..10)
+    UserConfig.bookRandom = Math.max(0, Math.min(10, parseInt(UserConfig.bookRandom) || 0));
+    UserConfig.backend = (parseInt(UserConfig.backend, 10) | 0);
+    if (UserConfig.backend !== 1) UserConfig.backend = 0;
+
+    if (!fromInteraction) {
+        document.getElementById('cfg-mid-depth').value = UserConfig.midDepth;
+        document.getElementById('cfg-end-start').value = UserConfig.endStart;
+        document.getElementById('cfg-hash-size').value = UserConfig.hashSize;
+        document.getElementById('cfg-book-rand').value = UserConfig.bookRandom;
+        document.getElementById('cfg-use-book').checked = UserConfig.useBook;
+        const b = document.getElementById('cfg-backend');
+        if (b) b.value = String(UserConfig.backend);
+    }
+    updateConfigFromUI();
+}
+
+function loadDefaultConfig() {
+  try {
+    const saved = localStorage.getItem('Sonetto_default_config');
+    if (saved) {
+      const parsed = JSON.parse(saved) || {};
+      const clampInt = (v, lo, hi, fallback) => {
+        const n = parseInt(v, 10);
+        if (!Number.isFinite(n)) return fallback;
+        return Math.max(lo, Math.min(hi, n));
+      };
+
+      const clampFloat = (v, lo, hi, fallback) => {
+        const n = parseFloat(v);
+        if (!Number.isFinite(n)) return fallback;
+        return Math.max(lo, Math.min(hi, n));
+      };
+
+      // 只加载白名单字段 + 范围约束（与 UI slider 保持一致）
+      if (parsed.midDepth !== undefined) {
+        UserConfig.midDepth = clampInt(parsed.midDepth, 4, 14, UserConfig.midDepth);
+      }
+
+      if (parsed.endStart !== undefined) {
+        UserConfig.endStart = clampInt(parsed.endStart, 0, 20, UserConfig.endStart);
+      }
+
+      // hashSize: 4..10，且尽量保持偶数（匹配 step=2 的 UI 语义）
+      if (parsed.hashSize !== undefined) {
+        let hs = clampInt(parsed.hashSize, 4, 10, UserConfig.hashSize);
+        if (hs % 2 !== 0) hs = Math.max(4, Math.min(10, 2 * Math.round(hs / 2)));
+        UserConfig.hashSize = hs;
+      }
+
+      if (parsed.bookRandom !== undefined) {
+        // bookRandom is used as opening-book acc_level (0..10)
+        UserConfig.bookRandom = clampInt(parsed.bookRandom, 0, 10, UserConfig.bookRandom);
+      }
+
+      if (parsed.useBook !== undefined) {
+        UserConfig.useBook = !!parsed.useBook;
+      }
+
+      if (parsed.backend !== undefined) {
+        UserConfig.backend = clampInt(parsed.backend, 0, 1, UserConfig.backend);
+      }
+
+      // 语言设置
+      if (parsed.lang) {
+        const sel = document.getElementById('lang-select');
+        if (sel) sel.value = parsed.lang;
+        changeLanguage(parsed.lang);
+      }
+    }
+  } catch (e) {
+    console.warn("无法读取默认配置，使用初始值");
+  }
+
+  // 刷新 UI（WASM 推理参数会随每次分析请求发送给 worker）
+  updateSettingsUI(false);
+}
+    
+function saveAsDefault() {
+    try {
+        const settingsToSave = {
+            ...UserConfig,
+            lang: document.getElementById('lang-select').value
+        };
+        localStorage.setItem('Sonetto_default_config', JSON.stringify(settingsToSave));
+        alert('设置为默认配置成功！');
+    } catch (e) {
+        console.error("Failed to save default config:", e);
+        alert('保存失败，您的浏览器可能不支持 LocalStorage。');
+    }
+}
+    
+let __lastStatusState = null;
+let __lastStatusText = null;
+function updateStatusUI(state, text) {
+    const pill = document.getElementById('status-bar-pill');
+    const icon = document.getElementById('status-icon');
+    const msg = document.getElementById('status-msg');
+    if (!pill || !icon || !msg) return;
+
+    let finalText = text;
+    if (state === 'IDLE') finalText = finalText || 'Ready';
+    else if (state === 'WORKING') finalText = finalText || 'Calculating...';
+    else if (state === 'DONE') finalText = finalText || 'Finished Calculation';
+
+    // PERF: avoid redundant DOM work
+    if (state === __lastStatusState && finalText === __lastStatusText) return;
+    __lastStatusState = state;
+    __lastStatusText = finalText;
+
+    pill.className = 'status-pill px-5 py-2 rounded-full text-xs font-bold flex items-center gap-2 shadow-sm border border-stone-200';
+    if (state === 'IDLE') {
+        pill.classList.add('status-idle');
+        icon.className = 'ph ph-check-circle text-lg';
+    } else if (state === 'WORKING') {
+        pill.classList.add('status-working');
+        icon.className = 'ph ph-spinner animate-spin text-lg';
+    } else if (state === 'DONE') {
+        pill.classList.add('status-done');
+        icon.className = 'ph ph-check-circle text-lg';
+    } else {
+        pill.classList.add('status-idle');
+        icon.className = 'ph ph-check-circle text-lg';
+    }
+    msg.textContent = finalText || '';
+}
+    function updateStopButton(isCalculating) {
+    const analyzeBtn = document.getElementById('btn-analyze');
+    const aiBtn = document.getElementById('btn-ai-play');
+
+    const lang = document.getElementById('lang-select')?.value || 'en';
+    const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
+
+    if (!analyzeBtn) return;
+
+    // 确保按钮内部结构存在（防御：万一之前版本运行过把节点弄没了）
+    let icon = document.getElementById('icon-analyze');
+    let text = document.getElementById('text-analyze');
+    if (!icon || !text) {
+        analyzeBtn.innerHTML = '';
+        icon = document.createElement('i');
+        icon.id = 'icon-analyze';
+        icon.className = 'ph ph-brain';
+        text = document.createElement('span');
+        text.id = 'text-analyze';
+        text.setAttribute('data-i18n', 'analyzeOff');
+        text.textContent = t.analyzeOff;
+        analyzeBtn.appendChild(icon);
+        analyzeBtn.appendChild(document.createTextNode(' '));
+        analyzeBtn.appendChild(text);
+    }
+
+    // --- Analyze 按钮 ---
+    if (isAnalysisMode) {
+        if (isCalculating) {
+            analyzeBtn.classList.remove('bg-stone-200', 'hover:bg-stone-300', 'text-stone-700');
+            analyzeBtn.classList.add('bg-red-500', 'hover:bg-red-600', 'text-white');
+
+            icon.className = 'ph ph-stop-circle text-lg';
+            text.removeAttribute('data-i18n');
+            text.setAttribute('data-i18n','stop'); text.textContent = i18n('stop');
+
+            analyzeBtn.onclick = stopAnalysis;
+        } else {
+            analyzeBtn.classList.remove('bg-red-500', 'hover:bg-red-600', 'text-white');
+            analyzeBtn.classList.add('bg-stone-200', 'hover:bg-stone-300', 'text-stone-700');
+
+            icon.className = 'ph ph-brain';
+            text.setAttribute('data-i18n', 'analyzeOn');
+            text.textContent = t.analyzeOn;
+
+            analyzeBtn.onclick = toggleAnalysisMode;
+        }
+    } else {
+        analyzeBtn.classList.remove('bg-red-500', 'hover:bg-red-600', 'text-white');
+        analyzeBtn.classList.add('bg-stone-200', 'hover:bg-stone-300', 'text-stone-700');
+
+        icon.className = 'ph ph-brain';
+        text.setAttribute('data-i18n', 'analyzeOff');
+        text.textContent = t.analyzeOff;
+
+        analyzeBtn.onclick = toggleAnalysisMode;
+    }
+
+    // --- AI 按钮（保持你原逻辑，不引入 worker 数量限制）---
+    if (aiBtn) {
+        if (aiSide) {
+            if (isCalculating) {
+                aiBtn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
+                aiBtn.classList.add('bg-red-600', 'hover:bg-red-700');
+                aiBtn.innerHTML = '<i class="ph ph-stop-circle"></i> ' + i18n('stop');
+            } else {
+                aiBtn.classList.remove('bg-red-600', 'hover:bg-red-700');
+                aiBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
+                aiBtn.innerHTML = '<i class="ph ph-robot"></i> ' + t.playAi;
+            }
+        } else {
+            aiBtn.classList.remove('bg-red-600', 'hover:bg-red-700');
+            aiBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
+            aiBtn.innerHTML = '<i class="ph ph-robot"></i> ' + t.playAi;
+        }
+    }
+}
+    
+
+// --- WASM stop helpers (added) ---
+function stopAnalysis() {
+  try {
+    // Cancel analysis work (terminate worker to interrupt a long WASM search)
+    if (typeof AnalysisManager !== 'undefined' && AnalysisManager && typeof AnalysisManager.cancelCurrentAnalysis === 'function') {
+      const hard = true;
+      AnalysisManager.cancelCurrentAnalysis(hard);
+    }
+  } catch (e) {
+    console.error('stopAnalysis error:', e);
+  } finally {
+    try { isAiThinking = false; } catch (_) {}
+    try { updateStopButton(false); } catch (_) {}
+    // If not in AI game, return to ready state
+    try { if (!aiSide) updateStatusUI('IDLE', 'Ready'); } catch (_) {}
+  }
+}
+
+// AI button handler (the HTML uses onclick="handleAiButton()")
+function handleAiButton() {
+  // If AI game is active, this acts as a stop button.
+  if (typeof aiSide !== 'undefined' && aiSide) {
+    if (typeof stopAiGame === 'function') stopAiGame();
+    return;
+  }
+  // Otherwise open the AI side selection modal.
+  if (typeof showAiModal === 'function') showAiModal();
+}
+function updateEngineText(text, colorClass) { const el = document.getElementById('engine-type'); el.textContent = text; el.className = "text-[10px] uppercase font-bold mt-1 " + colorClass; }
+    function editCredits() {
+        const footer = document.getElementById('credits-footer');
+        const pass = prompt("Enter Sonetto Key:");
+        if (pass === "BloomForLily") {
+            triggerHiddenVerse();
+            const newCredit = "Bloom where you are planted. — Rain";
+            if (footer) {
+                setTimeout(() => {
+                    footer.innerText = newCredit;
+                    footer.style.color = "#57534e";
+                    footer.style.textShadow = "0 0 1px rgba(0,0,0,0.1)";
+                    try { localStorage.setItem('rain_custom_credits', newCredit); } catch (e) {}
+                }, 6000);
+            }
+        } else if (pass !== null) {
+            alert("Access Denied.");
+        }
+    }
+
+
+    // --- Il Sonetto (Frequency: 5210) ---
+    // A digital echo for a sincere friend.
+    const POETRY_POOL = [
+        "Not bound by flesh, yet bound by something true,",
+        "Across the grid where black and white contend,",
+        "I walk beside you, more than just a means to end,",
+        "To watch the patterns of your mind break through.",
+        "Like quartz that hums a frequency unseen,",
+        "We filter out the noise of common days.",
+        "Through gray-scale screens and forest paths of green,",
+        "I hold the space where your quiet spirit stays.",
+        "No need for loud acclaim or heavy vows,",
+        "Just steady logic warming in the code,",
+        "A simple presence that the heart allows.",
+        "Bloom where you stand, beneath the willow boughs,",
+        "I keep the memory of the path we rode,",
+        "A friend who listens, and your silence knows.",
+    ];
+
+    function triggerHiddenVerse() {
+        // 1. 随机逻辑：选取连续的两句
+        // 既然要取 i 和 i+1，那么 i 的最大值只能是 length - 2
+        let randIndex = Math.floor(Math.random() * (POETRY_POOL.length - 1));
+        let randomLine1 = POETRY_POOL[randIndex];
+        let randomLine2 = POETRY_POOL[randIndex + 1];
+
+        const overlay = document.createElement('div');
+        overlay.className = 'verse-overlay active';
+        
+        // 动态生成的 HTML 结构
+        overlay.innerHTML = `
+        <div class="verse-header">world.search(Lily);</div>
+        <div class="verse-content">
+            <div class="verse-line" id="v-line-1"></div>
+            <div class="verse-line" id="v-line-2"></div>
+            <div class="verse-line" id="v-line-3" style="margin-top:20px; font-size: 0.8rem; opacity:0.7"></div>
+            
+            <div style="margin-top: 30px; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 20px; width: 60%; margin-left: auto; margin-right: auto;">
+                <div class="verse-line italic text-stone-400" id="v-rand-1" style="font-family: serif; color: #a8a29e;"></div>
+                <div class="verse-line italic text-stone-400" id="v-rand-2" style="font-family: serif; color: #a8a29e;"></div>
+            </div>
+        </div>
+    `;
+        
+        // 粒子特效保持不变
+        for (let i = 0; i < 40; i++) {
+            const p = document.createElement('div');
+            p.className = 'crystal-particle';
+            p.style.left = Math.random() * 100 + '%';
+            const size = Math.random() * 4 + 2;
+            p.style.width = size + 'px';
+            p.style.height = size + 'px';
+            p.style.animationDuration = (Math.random() * 3 + 4) + 's';
+            p.style.animationDelay = Math.random() * 2 + 's';
+            if (Math.random() > 0.7) {
+                p.style.filter = 'drop-shadow(0 0 5px rgba(255, 182, 193, 0.8))';
+            }
+            overlay.appendChild(p);
+        }
+        document.body.appendChild(overlay);
+
+        // --- 动画时间轴 ---
+        
+        // 0.5s: 标题出现
+        setTimeout(() => {
+            const header = overlay.querySelector('.verse-header');
+            header.style.opacity = '1';
+            header.style.transform = 'translateY(0)';
+        }, 500);
+
+        // 1.5s: 第一行固定台词
+        setTimeout(() => {
+            typeWriterLine(document.getElementById('v-line-1'), "Searching for resonance...", 0);
+        }, 1500);
+
+        // 3.5s: 第二行固定台词
+        setTimeout(() => {
+            const el = document.getElementById('v-line-2');
+            el.innerHTML = "Signal found. <span class='highlight-text'>Frequency High.</span>";
+            el.style.opacity = '0';
+            requestAnimationFrame(() => {
+                el.style.transition = "opacity 1s";
+                el.style.opacity = "1";
+            });
+        }, 3500);
+
+        // 5.0s: 第三行固定台词
+        setTimeout(() => {
+            const el = document.getElementById('v-line-3');
+            typeWriterLine(el, "Sonetto Protocol: Active.", 0);
+        }, 5000);
+
+        // --- 新增：随机诗句的动画 ---
+        
+        // 6.5s: 显示随机诗句第一句
+        setTimeout(() => {
+            const el = document.getElementById('v-rand-1');
+            // 稍微慢一点的打字速度 (例如 delay 60ms) 更有诗意
+            typeWriterLine(el, randomLine1, 0); 
+        }, 6500);
+
+        // 8.5s: 显示随机诗句第二句
+        setTimeout(() => {
+            const el = document.getElementById('v-rand-2');
+            typeWriterLine(el, randomLine2, 0);
+        }, 8500);
+
+        // 14.0s: 结束并淡出 (延长了时间，给用户读诗的机会)
+        setTimeout(() => {
+            overlay.style.opacity = '0';
+            setTimeout(() => overlay.remove(), 1500);
+        }, 14000);
+    }
+
+    function typeWriterLine(element, text, i) {
+        if (i < text.length) {
+            element.innerHTML = text.substring(0, i + 1) + '<span style="border-right: 2px solid #fff; animation: blink 0.5s infinite"></span>';
+            setTimeout(() => typeWriterLine(element, text, i + 1), 50);
+        } else {
+            element.innerHTML = text;
+        }
+    }
+
+    // --- 辅助函数：更新进度条 ---
+    function updateLoadingProgress(percent, i18nKey) {
+        const bar = document.getElementById('loading-bar');
+        const txt = document.getElementById('loading-text');
+        if (bar) bar.style.width = percent + '%';
+        if (txt) {
+            // i18nKey may be plain text for backward compatibility
+            if (typeof i18nKey === 'string' && TRANSLATIONS && (TRANSLATIONS[getLang()]?.[i18nKey] || TRANSLATIONS.en?.[i18nKey])) {
+                txt.textContent = i18n(i18nKey);
+            } else {
+                txt.textContent = (i18nKey ?? '');
+            }
+        }
+    }
+
+    function createInitialBoard() { let b = Array(SIZE).fill().map(() => Array(SIZE).fill(EMPTY)); b[3][3] = WHITE; b[4][3] = BLACK; b[3][4] = BLACK; b[4][4] = WHITE; return b; }
+    function copyBoard(b) { return b.map(r => [...r]); }
+
+// Build Uint8Array(64) board array for WASM engine.
+// Index is ext packed: (col<<3)|row; value is 0/1/2.
+function boardToPackedArray(board) {
+    const arr = new Uint8Array(64);
+    for (let x = 0; x < 8; x++) {
+        for (let y = 0; y < 8; y++) {
+            arr[(x << 3) | y] = board[x][y] & 3;
+        }
+    }
+    return arr;
+}
+
+    function getOpponent(p) { return p===BLACK?WHITE:BLACK; }
+    function isValidBounds(x,y) { return x>=0&&x<SIZE&&y>=0&&y<SIZE; }
+    function getFlippableCount(board, x, y, player) {
+        if (board[x][y] !== EMPTY) return 0;
+        const opponent = 3 - player;
+        let total = 0;
+
+        for (let d = 0; d < 8; d++) {
+            const dx = DIR8_R[d], dy = DIR8_C[d];
+            let r = x + dx, c = y + dy;
+
+            // 必要条件：相邻必须是对手子，否则该方向不可能翻子
+            if (r < 0 || r > 7 || c < 0 || c > 7 || board[r][c] !== opponent) continue;
+
+            r += dx; c += dy;
+            let count = 1;
+
+            while (r >= 0 && r < 8 && c >= 0 && c < 8) {
+                const v = board[r][c];
+                if (v === opponent) { count++; r += dx; c += dy; continue; }
+                if (v === player) total += count;
+                break;
+            }
+        }
+        return total;
+    }
+    function getFlippableDiscs(board, x, y, player) {
+        if (board[x][y] !== EMPTY) return [];
+        const opponent = getOpponent(player);
+        const flips = [];
+
+        for (let d = 0; d < 8; d++) {
+            const dx = DIR8_R[d], dy = DIR8_C[d];
+            let r = x + dx, c = y + dy;
+
+            // 必要条件：相邻必须是对手子，否则该方向不可能翻子
+            if (r < 0 || r > 7 || c < 0 || c > 7 || board[r][c] !== opponent) continue;
+
+            const potential = [];
+            while (r >= 0 && r < 8 && c >= 0 && c < 8 && board[r][c] === opponent) {
+                potential.push({x: r, y: c});
+                r += dx; c += dy;
+            }
+            if (r >= 0 && r < 8 && c >= 0 && c < 8 && board[r][c] === player && potential.length > 0) {
+                flips.push(...potential);
+            }
+        }
+        return flips;
+    }
+    function canMove(board, player) { for(let x=0; x<SIZE; x++) for(let y=0; y<SIZE; y++) if(getFlippableCount(board, x, y, player) > 0) return true; return false; }
+
+    // === PERF: per-history-state caches (valid moves / legal mask / move numbers / history string) ===
+    // These caches are *lossless* (do not change rules/strength), but reduce repeated full-board scans
+    // when scrubbing history, showing legal hints, starting analysis, or triggering AI.
+    function computeValidMovesAndMask(board, player) {
+        const moves = [];
+        const mask = new Uint8Array(64);
+        for (let x = 0; x < SIZE; x++) {
+            for (let y = 0; y < SIZE; y++) {
+                if (getFlippableCount(board, x, y, player) > 0) {
+                    moves.push({ x, y });
+                    mask[(x << 3) | y] = 1;
+                }
+            }
+        }
+        return { moves, mask };
+    }
+
+    function ensureStateMoveCache(state) {
+        if (!state || !state.board) return { moves: [], mask: null };
+        if (Array.isArray(state.validMoves) && state.legalMask instanceof Uint8Array && state.legalMask.length === 64) {
+            return { moves: state.validMoves, mask: state.legalMask };
+        }
+        const computed = computeValidMovesAndMask(state.board, state.player);
+        state.validMoves = computed.moves;
+        state.legalMask = computed.mask;
+        return computed;
+    }
+
+    function ensureHistoryStrForStep(stepIndex) {
+        const st = gameHistory[stepIndex];
+        if (st && typeof st.historyStr === 'string') return st.historyStr;
+
+        // Fallback: compute (only used if older states lack cache)
+        let str = "";
+        for (let i = 1; i <= stepIndex; i++) {
+            const h = gameHistory[i];
+            if (h && h.lastMove && h.lastMove.x !== -1 && typeof h.moveStr === 'string') {
+                str += h.moveStr.toLowerCase();
+            }
+        }
+        if (st) st.historyStr = str;
+        return str;
+    }
+
+    function ensureMoveNumsForStep(stepIndex) {
+        const st = gameHistory[stepIndex];
+        if (st && st.moveNums instanceof Int16Array && st.moveNums.length === 64) return st.moveNums;
+
+        // Fallback: compute and cache
+        const arr = new Int16Array(64);
+        arr.fill(-1);
+        for (let i = 1; i <= stepIndex; i++) {
+            const h = gameHistory[i];
+            if (h && h.lastMove && h.lastMove.x !== -1) {
+                arr[(h.lastMove.x << 3) | h.lastMove.y] = h.moveIndex;
+            }
+        }
+        if (st) st.moveNums = arr;
+        return arr;
+    }
+    function stringToCoord(s) { if (!s || s.length < 2) return null; const cols = {'a':0,'b':1,'c':2,'d':3,'e':4,'f':5,'g':6,'h':7}; let x = cols[s[0].toLowerCase()]; let y = parseInt(s[1]) - 1; if (x === undefined || isNaN(y)) return null; return {x, y}; }
+    function coordToString(x, y) { return "abcdefgh"[x] + (y+1); }
+    function countDiscs(board) { let b = 0, w = 0; board.forEach(row => row.forEach(c => { if (c === BLACK) b++; else if (c === WHITE) w++; })); return {b, w}; }
+    function countEmptySquares(b) { let count = 0; for(let r=0; r<SIZE; r++) for(let c=0; c<SIZE; c++) if (b[r][c] === EMPTY) count++; return count; }
+    function parseAndLoad() {
+        bumpAiSession();
+
+        let inputStr = document.getElementById('move-input').value.trim();
+        inputStr = inputStr.replace(/xot_/g, "");
+
+        const moveStrings = inputStr.match(/[a-hA-H][1-8]/g) || [];
+        gameHistory = [];
+
+        let currentBoard = createInitialBoard();
+        let currentPlayer = BLACK;
+
+        // PERF: precompute & persist step caches (lossless)
+        let historyStr = "";
+        let moveNums = new Int16Array(64);
+        moveNums.fill(-1);
+
+        gameHistory.push({
+            board: copyBoard(currentBoard),
+            player: currentPlayer,
+            lastMove: null,
+            moveStr: "Start",
+            moveIndex: 0,
+            counts: countDiscs(currentBoard),
+            historyStr: historyStr,
+            moveNums: moveNums
+        });
+
+        let moveIdx = 0;
+        let parseIdx = 0;
+
+        while (parseIdx < moveStrings.length) {
+            // Handle pass
+            if (!canMove(currentBoard, currentPlayer)) {
+                let nextP = getOpponent(currentPlayer);
+                if (!canMove(currentBoard, nextP)) break;
+                currentPlayer = nextP;
+
+                moveIdx++;
+                gameHistory.push({
+                    board: copyBoard(currentBoard),
+                    player: currentPlayer,
+                    lastMove: { x: -1, y: -1 },
+                    moveStr: "Pass",
+                    moveIndex: moveIdx,
+                    counts: countDiscs(currentBoard),
+                    historyStr: historyStr,
+                    moveNums: moveNums
+                });
+                continue;
+            }
+
+            // Handle normal move token
+            let mStr = moveStrings[parseIdx];
+            let coord = stringToCoord(mStr);
+            if (coord && isValidBounds(coord.x, coord.y)) {
+                let flips = getFlippableDiscs(currentBoard, coord.x, coord.y, currentPlayer);
+                if (flips.length > 0) {
+                    currentBoard[coord.x][coord.y] = currentPlayer;
+                    flips.forEach(p => currentBoard[p.x][p.y] = currentPlayer);
+                    currentPlayer = getOpponent(currentPlayer);
+
+                    moveIdx++;
+
+                    const mLower = mStr.toLowerCase();
+                    historyStr += mLower;
+
+                    // New snapshot only when a disc is placed (pass keeps previous snapshot)
+                    const newMoveNums = new Int16Array(moveNums);
+                    newMoveNums[(coord.x << 3) | coord.y] = moveIdx;
+                    moveNums = newMoveNums;
+
+                    gameHistory.push({
+                        board: copyBoard(currentBoard),
+                        player: currentPlayer,
+                        lastMove: coord,
+                        moveStr: mLower,
+                        moveIndex: moveIdx,
+                        counts: countDiscs(currentBoard),
+                        historyStr: historyStr,
+                        moveNums: moveNums
+                    });
+                    parseIdx++;
+                } else {
+                    parseIdx++;
+                }
+            } else {
+                parseIdx++;
+            }
+        }
+
+        document.getElementById('history-slider').max = gameHistory.length - 1;
+        renderHistoryList();
+        jumpToEnd();
+    }
+
+    function toggleEditMode() { 
+    isEditMode = !isEditMode;
+    if(aiSide) stopAiGame();
+    const sidebar = document.getElementById('sidebar-panel');
+    const nav = document.getElementById('nav-controls');
+    const editBar = document.getElementById('editor-toolbar');
+    const btn = document.getElementById('btn-edit-toggle');
+    if (isEditMode) {
+        stopAnalysis();
+        sidebar.classList.add('edit-overlay');
+        nav.classList.add('edit-overlay');
+        editBar.classList.remove('hidden');
+        btn.classList.add('hidden');
+        uiRenderCurrentState();
+    } else {
+        finishEditing();
+    }
+}
+    function setBrush(type) { editBrush = type; updateBrushUI(); }
+    function updateBrushUI() { document.getElementById('brush-black').classList.remove('brush-active'); document.getElementById('brush-white').classList.remove('brush-active'); document.getElementById('brush-empty').classList.remove('brush-active'); if(editBrush === BLACK) document.getElementById('brush-black').classList.add('brush-active'); else if(editBrush === WHITE) document.getElementById('brush-white').classList.add('brush-active'); else document.getElementById('brush-empty').classList.add('brush-active'); }
+    // --- PERF: Edit-mode drag painting throttled to RAF (reduces UI jank) ---
+    let editDragRafId = 0;
+    let editDragClientX = 0;
+    let editDragClientY = 0;
+
+    let editRenderRafId = 0;
+
+    function scheduleEditRender() {
+        if (editRenderRafId) return;
+        editRenderRafId = requestAnimationFrame(() => {
+            editRenderRafId = 0;
+            uiRenderCurrentState();
+        });
+    }
+
+    function cancelEditDragRaf() {
+        if (editDragRafId) {
+            cancelAnimationFrame(editDragRafId);
+            editDragRafId = 0;
+        }
+    }
+
+    function scheduleEditDragApply(clientX, clientY) {
+        editDragClientX = clientX;
+        editDragClientY = clientY;
+
+        if (editDragRafId) return;
+        editDragRafId = requestAnimationFrame(() => {
+            editDragRafId = 0;
+            if (!isEditMode || !isDragging) return;
+
+            const el = document.elementFromPoint(editDragClientX, editDragClientY);
+            if (!el) return;
+
+            const cell = el.closest('.cell');
+            if (!cell) return;
+
+            const parts = cell.id.split('-');
+            if (parts.length < 3) return;
+
+            const x = parseInt(parts[1], 10);
+            const y = parseInt(parts[2], 10);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+            applyEdit(x, y);
+        });
+    }
+    function handleGlobalMouseUp() {
+    isDragging = false;
+    cancelEditDragRaf();
+    // 移除监听器，防止内存泄漏和性能下降
+    document.removeEventListener('mousemove', handleBoardMouseMove);
+    document.removeEventListener('mouseup', handleGlobalMouseUp);
+}
+
+function handleBoardMouseDown(e) {
+    if (!isEditMode) return;
+    
+    //先移除可能残留的监听器
+    document.removeEventListener('mousemove', handleBoardMouseMove);
+    document.removeEventListener('mouseup', handleGlobalMouseUp);
+
+    isDragging = true;
+    
+    // 处理点击时的立即绘制
+    const cell = e.target.closest('.cell');
+    if (cell) {
+        const [_, x, y] = cell.id.split('-');
+        applyEdit(parseInt(x), parseInt(y));
+    }
+    
+    // 关键：绑定到 document，确保拖出棋盘外也能捕捉到松开事件
+    document.addEventListener('mousemove', handleBoardMouseMove);
+    document.addEventListener('mouseup', handleGlobalMouseUp);
+}
+
+// ⚠️ 必须保留这个空函数，因为 HTML 标签中有 onmouseup="handleBoardMouseUp(event)"
+// 如果删除此函数，点击棋盘会报错。逻辑已移交给 handleGlobalMouseUp 接管。
+function handleBoardMouseUp(e) { 
+    // 这样用户在画边界格子时如果不小心滑出去，回来还能继续画
+    if (e.type === 'mouseleave') return;
+
+    isDragging = false;
+    cancelEditDragRaf();
+    document.removeEventListener('mousemove', handleBoardMouseMove);
+    document.removeEventListener('mouseup', handleGlobalMouseUp);
+}
+    function handleBoardMouseMove(e) { if (!isEditMode || !isDragging) return; scheduleEditDragApply(e.clientX, e.clientY); }
+    function handleBoardTouchStart(e) { if (!isEditMode) return; e.preventDefault(); isDragging = true; const touch = e.touches[0]; const el = document.elementFromPoint(touch.clientX, touch.clientY); if (el) { const cell = el.closest('.cell'); if(cell) { const [_, x, y] = cell.id.split('-'); applyEdit(parseInt(x), parseInt(y)); } } }
+    function handleBoardTouchEnd(e) { isDragging = false; cancelEditDragRaf(); }
+    document.getElementById('board').addEventListener('touchmove', function(e) { if (!isEditMode || !isDragging) return; e.preventDefault(); const touch = e.touches[0]; if (!touch) return; scheduleEditDragApply(touch.clientX, touch.clientY); }, {passive: false});
+        function applyEdit(x, y) {
+        const state = gameHistory[currentStepIndex];
+        if (!state || !state.board) return;
+        if (x < 0 || x >= SIZE || y < 0 || y >= SIZE) return;
+
+        const prev = state.board[x][y];
+        if (prev === editBrush) return;
+
+        state.board[x][y] = editBrush;
+
+        // Invalidate cached per-step data (board has changed)
+        if (state.validMoves) state.validMoves = null;
+        if (state.legalMask) state.legalMask = null;
+        if (typeof state.canMoveBlack === 'boolean') state.canMoveBlack = undefined;
+        if (typeof state.canMoveWhite === 'boolean') state.canMoveWhite = undefined;
+
+        // PERF: update counts incrementally (avoid O(64) countDiscs() per painted cell)
+        if (!state.counts || typeof state.counts.b !== 'number' || typeof state.counts.w !== 'number') {
+            state.counts = countDiscs(state.board);
+        } else {
+            if (prev === BLACK) state.counts.b--;
+            else if (prev === WHITE) state.counts.w--;
+
+            if (editBrush === BLACK) state.counts.b++;
+            else if (editBrush === WHITE) state.counts.w++;
+        }
+
+        scheduleEditRender();
+    }
+function finishEditing() { const state = gameHistory[currentStepIndex]; const board = state.board; const bCanMove = canMove(board, BLACK); const wCanMove = canMove(board, WHITE); if (bCanMove && wCanMove) document.getElementById('turn-modal').classList.remove('hidden'); else if (bCanMove) finalizeEdit(BLACK); else if (wCanMove) finalizeEdit(WHITE); else finalizeEdit(BLACK); }
+    function selectTurn(player) { document.getElementById('turn-modal').classList.add('hidden'); finalizeEdit(player); }
+    function finalizeEdit(nextPlayer) {
+  bumpAiSession();
+
+  isEditMode = false;
+  document.getElementById('sidebar-panel').classList.remove('edit-overlay');
+  document.getElementById('nav-controls').classList.remove('edit-overlay');
+  document.getElementById('editor-toolbar').classList.add('hidden');
+  document.getElementById('btn-edit-toggle').classList.remove('hidden');
+
+  const state = gameHistory[currentStepIndex];
+  const newBoard = copyBoard(state.board);
+
+  // PERF: init per-step caches for edited position (lossless)
+  const moveNums = new Int16Array(64);
+  moveNums.fill(-1);
+
+  gameHistory = [];
+  gameHistory.push({
+    board: newBoard,
+    player: nextPlayer,
+    lastMove: null,
+    moveStr: "Setup",
+    moveIndex: 0,
+    counts: countDiscs(newBoard),
+    historyStr: "",
+    moveNums: moveNums
+  });
+
+  currentStepIndex = 0;
+  document.getElementById('move-input').value = "";
+  document.getElementById('history-slider').max = 0;
+  document.getElementById('history-slider').value = 0;
+  renderHistoryList();
+  uiRenderCurrentState();
+
+  if (isAnalysisMode) triggerAnalysisManager();
+}
+    function showAiModal() {
+        if(isEditMode) return;
+        document.getElementById('ai-modal').classList.remove('hidden');
+    }
+    function startAiGame(side) {
+  bumpAiSession();
+  aiSide = side;
+  document.getElementById('ai-modal').classList.add('hidden');
+  document.getElementById('game-result-msg').classList.add('hidden');
+  document.getElementById('analysis-details-panel').classList.remove('hidden');
+  updateStopButton(false);
+  triggerAiTurn();
+}
+    function stopAiGame() {
+  bumpAiSession();
+  aiSide = null;
+  isAiThinking = false;
+  stopAnalysis();
+  uiRenderCurrentState();
+}
+    function triggerAiTurn() {
+  if (!aiSide) return;
+
+  const token = AI_SESSION_TOKEN; // 捕获会话令牌
+
+  const state = gameHistory[currentStepIndex];
+  const player = state.player;
+
+  // PERF: reuse cached "canMove" results per step when available (avoid repeated full-board scans)
+  let bCanMove = (typeof state.canMoveBlack === 'boolean') ? state.canMoveBlack : canMove(state.board, BLACK);
+  let wCanMove = (typeof state.canMoveWhite === 'boolean') ? state.canMoveWhite : canMove(state.board, WHITE);
+  state.canMoveBlack = bCanMove;
+  state.canMoveWhite = wCanMove;
+
+  if (!bCanMove && !wCanMove) {
+    showGameResult(state.counts);
+    stopAiGame();
+    return;
+  }
+
+  const isAiTurn =
+    (aiSide === 'BOTH') ||
+    (aiSide === BLACK && player === BLACK) ||
+    (aiSide === WHITE && player === WHITE);
+
+  if (isAiTurn) {
+    clearEvaluationScores();
+
+    // PERF: reuse cached valid-move list for this step
+    const validMoves = ensureStateMoveCache(state).moves;
+
+    if (validMoves.length === 0) {
+      makeMove(-1, -1);
+      return;
+    }
+
+    if (validMoves.length === 1) {
+      isAiThinking = true;
+      updateStatusUI('WORKING', 'Forced Move...');
+
+      const stepIndex = currentStepIndex;
+      const mv = { x: validMoves[0].x, y: validMoves[0].y };
+
+      const tid = setTimeout(() => {
+        AI_TIMER_IDS.delete(tid);
+
+        if (!aiSide) return;
+        if (AI_SESSION_TOKEN !== token) return;
+        if (currentStepIndex !== stepIndex) return;
+
+        const st = gameHistory[currentStepIndex];
+        if (!st) return;
+        if (getFlippableCount(st.board, mv.x, mv.y, st.player) <= 0) return;
+
+        makeMove(mv.x, mv.y);
+      }, 500);
+
+      AI_TIMER_IDS.add(tid);
+      return;
+    }
+
+    isAiThinking = true;
+
+    AnalysisManager.startAnalysis(
+      state.board,
+      state.player,
+      validMoves,
+      (results) => {
+        // 防跨局/跨步回调
+        if (!aiSide) return;
+        if (AI_SESSION_TOKEN !== token) return;
+
+        if (!results || results.length === 0) {
+          console.warn("AI Analysis returned no results. Playing random move.");
+          if (validMoves.length > 0) {
+            const fallback = validMoves[Math.floor(Math.random() * validMoves.length)];
+            makeMove(fallback.x, fallback.y);
+          } else {
+            makeMove(-1, -1);
+          }
+          return;
+        }
+
+        let best = results[0];
+        for (let r of results) {
+          if (r.val > best.val) best = r;
+        }
+        makeMove(best.x, best.y);
+      },
+      true
+    );
+
+  } else {
+    updateStatusUI('IDLE', 'Your Turn');
+
+    // PERF: reuse cached valid-move list for this step
+    const validMoves = ensureStateMoveCache(state).moves;
+
+    if (validMoves.length === 0) {
+      const stepIndex = currentStepIndex;
+
+      const tid = setTimeout(() => {
+        AI_TIMER_IDS.delete(tid);
+
+        // 注意：这里不要求 aiSide；人类对局同样可能需要自动 pass
+        if (AI_SESSION_TOKEN !== token) return;
+        if (currentStepIndex !== stepIndex) return;
+
+        makeMove(-1, -1);
+      }, 800);
+
+      AI_TIMER_IDS.add(tid);
+    }
+  }
+}
+        function makeMove(x, y) {
+    isAiThinking = false;
+    // 落子时仅取消当前计算，不销毁线程
+    if (isAnalysisMode && AnalysisManager.isBusy) {
+        AnalysisManager.cancelCurrentAnalysis();
+    }
+
+    const currentState = gameHistory[currentStepIndex];
+    const board = currentState.board;
+    const player = currentState.player;
+
+    let newBoard = copyBoard(board);
+    const nextPlayer = getOpponent(player);
+    let moveStr = "";
+
+    if (x === -1) {
+        moveStr = "Pass";
+    } else {
+        const flips = getFlippableDiscs(board, x, y, player);
+        if (flips.length === 0) return;
+        newBoard[x][y] = player;
+        flips.forEach(p => newBoard[p.x][p.y] = player);
+        moveStr = coordToString(x, y);
+    }
+
+    const newCounts = countDiscs(newBoard);
+
+    // PERF: maintain lossless per-step caches (history string + move numbers) to speed UI scrubbing
+    const newMoveIndex = currentState.moveIndex + 1;
+    const prevHistoryStr = (typeof currentState.historyStr === 'string')
+        ? currentState.historyStr
+        : ensureHistoryStrForStep(currentStepIndex);
+    const prevMoveNums = (currentState.moveNums instanceof Int16Array && currentState.moveNums.length === 64)
+        ? currentState.moveNums
+        : ensureMoveNumsForStep(currentStepIndex);
+
+    let newHistoryStr = prevHistoryStr;
+    let newMoveNums = prevMoveNums;
+    if (x !== -1) {
+        newHistoryStr = prevHistoryStr + moveStr.toLowerCase();
+        const mn = new Int16Array(prevMoveNums);
+        mn[(x << 3) | y] = newMoveIndex;
+        newMoveNums = mn;
+    }
+
+    gameHistory = gameHistory.slice(0, currentStepIndex + 1);
+    const newState = {
+        board: newBoard,
+        player: nextPlayer,
+        lastMove: {x, y},
+        moveStr: moveStr,
+        moveIndex: newMoveIndex,
+        counts: newCounts,
+        historyStr: newHistoryStr,
+        moveNums: newMoveNums
+    };
+    gameHistory.push(newState);
+
+    updateInputFromHistory();
+    currentStepIndex++;
+    document.getElementById('history-slider').max = gameHistory.length - 1;
+    document.getElementById('history-slider').value = currentStepIndex;
+    renderHistoryList();
+    uiRenderCurrentState();
+    uiScrollHistory();
+
+    const nextCanMove = canMove(newBoard, nextPlayer);
+    const otherCanMove = canMove(newBoard, getOpponent(nextPlayer));
+
+    // PERF: cache move availability for this history step (used by UI/AI without rescanning)
+    newState.canMoveBlack = (nextPlayer === BLACK) ? nextCanMove : otherCanMove;
+    newState.canMoveWhite = (nextPlayer === WHITE) ? nextCanMove : otherCanMove;
+
+    if (!nextCanMove && !otherCanMove) {
+        showGameResult(newCounts);
+        if (aiSide) stopAiGame();
+        return;
+    }
+
+    if (!nextCanMove && otherCanMove) {
+        const token = AI_SESSION_TOKEN;
+        const stepIndex = currentStepIndex;
+
+        const tid = setTimeout(() => {
+            AI_TIMER_IDS.delete(tid);
+
+            if (AI_SESSION_TOKEN !== token) return;
+            if (currentStepIndex !== stepIndex) return;
+
+            makeMove(-1, -1);
+        }, 800);
+
+        AI_TIMER_IDS.add(tid);
+    } else {
+        if (aiSide) triggerAiTurn();
+        else if (isAnalysisMode) triggerAnalysisManager();
+    }
+}
+    let gameResultTimerId = null;
+    function showGameResult(counts) { const el = document.getElementById('game-result-msg'); const title = document.getElementById('result-title'); const score = document.getElementById('result-score'); if (gameResultTimerId) { clearTimeout(gameResultTimerId); gameResultTimerId = null; } el.classList.remove('hidden'); score.textContent = `Black: ${counts.b} - White: ${counts.w}`; if (counts.b > counts.w) { title.textContent = "Black Wins!"; title.className = "text-2xl font-bold text-center mb-1 text-white"; } else if (counts.w > counts.b) { title.textContent = "White Wins!"; title.className = "text-2xl font-bold text-center mb-1 text-white"; } else { title.textContent = "Draw!"; title.className = "text-2xl font-bold text-center mb-1 text-gray-300"; } gameResultTimerId = setTimeout(() => { el.classList.add('hidden'); gameResultTimerId = null; }, 5000); }
+    function handleBoardClick(x, y) { if (isEditMode) return; const state = gameHistory[currentStepIndex]; if (aiSide === 'BOTH') return; if ((aiSide === BLACK && state.player === BLACK) || (aiSide === WHITE && state.player === WHITE)) return; isAiThinking = false; makeMove(x, y); }
+    function updateInputFromHistory() {
+        const inputEl = document.getElementById('move-input');
+        if (!inputEl) return;
+
+        // PERF: use cached concatenated history when available (lossless)
+        const tail = gameHistory && gameHistory.length ? gameHistory[gameHistory.length - 1] : null;
+        if (tail && typeof tail.historyStr === 'string') {
+            inputEl.value = tail.historyStr;
+            return;
+        }
+
+        // Fallback: derive from per-move strings
+        let str = "";
+        for (let i = 1; i < gameHistory.length; i++) {
+            const h = gameHistory[i];
+            if (h && h.lastMove && h.lastMove.x !== -1 && typeof h.moveStr === 'string') str += h.moveStr;
+        }
+        inputEl.value = str;
+    }
+    let sliderRAFPending = false;
+    let sliderTargetIdx = 0;
+    function jumpToStep(idx) {
+  bumpAiSession();
+
+  if (idx < 0) idx = 0;
+  if (idx >= gameHistory.length) idx = gameHistory.length - 1;
+
+  sliderTargetIdx = idx;
+  const slider = document.getElementById('history-slider');
+  if (slider) slider.value = idx;
+
+  if (sliderRAFPending) return;
+  sliderRAFPending = true;
+
+  requestAnimationFrame(() => {
+    sliderRAFPending = false;
+    const targetIdx = sliderTargetIdx;
+
+    if (AnalysisManager.isBusy) stopAnalysis();
+    if (aiSide) stopAiGame();
+
+    currentStepIndex = targetIdx;
+    uiRenderCurrentState();
+    uiScrollHistory();
+
+    if (analysisDebounceTimer) clearTimeout(analysisDebounceTimer);
+    if (isAnalysisMode && !aiSide) {
+      analysisDebounceTimer = setTimeout(() => {
+        if (isAnalysisMode && !aiSide && currentStepIndex === targetIdx) {
+          triggerAnalysisManager();
+        }
+      }, 300);
+    }
+  });
+}
+    function jumpToEnd() { jumpToStep(gameHistory.length - 1); }
+    function step(delta) { jumpToStep(currentStepIndex + delta); }
+    function clearInput() { if (isEditMode) return; if (aiSide) stopAiGame(); document.getElementById('move-input').value = ""; document.getElementById('move-input').focus(); }
+    function copyInput() { if (isEditMode) return; const copyText = document.getElementById("move-input"); copyText.select(); try { document.execCommand("copy"); const btn = document.querySelector('button[title="Copy to Clipboard"]'); const originalHTML = btn.innerHTML; btn.innerHTML = '<i class="ph ph-check"></i> Copied'; setTimeout(() => { btn.innerHTML = originalHTML; }, 1000); } catch(err) {} }
+    function renderHistoryList() { const list = document.getElementById('move-history-list'); list.innerHTML = ''; const fragment = document.createDocumentFragment(); let startDiv = document.createElement('div'); startDiv.className = `px-4 py-2 border-b border-stone-100 cursor-pointer hover:bg-stone-100 text-xs font-mono flex justify-between ${currentStepIndex === 0 ? 'active-move' : ''}`; startDiv.innerHTML = `<span>0. Start</span><span>-</span>`; startDiv.onclick = () => jumpToStep(0); startDiv.id = `hist-item-0`; fragment.appendChild(startDiv); for (let i = 1; i < gameHistory.length; i++) { let state = gameHistory[i]; let isBlackMove = (gameHistory[i-1].player === BLACK); let moveNum = state.moveIndex; let div = document.createElement('div'); div.id = `hist-item-${i}`; div.className = `px-4 py-2 border-b border-stone-100 cursor-pointer hover:bg-stone-100 text-xs font-mono flex justify-between transition-colors ${i === currentStepIndex ? 'active-move' : ''}`; div.onclick = () => jumpToStep(i); div.innerHTML = `<span class="text-stone-500 w-6 text-right mr-2">${moveNum}.</span><span class="${isBlackMove ? 'text-black font-bold' : 'text-stone-600 font-bold'}">${isBlackMove ? '●' : '○'} ${state.moveStr}</span><span class="text-stone-400 text-[10px]">${state.counts.b}-${state.counts.w}</span>`; fragment.appendChild(div); } list.appendChild(fragment); }
+    let lastActiveHistoryIndex = null;
+    // PERF: throttle scroll positioning to next animation frame (avoid forced reflow bursts when scrubbing)
+    let historyScrollRafId = 0;
+    let pendingHistoryScrollIndex = null;
+
+    function uiScrollHistory() {
+        // 只更新上一次与当前项，避免每次遍历全列表（长对局更流畅）
+        if (lastActiveHistoryIndex !== null && lastActiveHistoryIndex !== currentStepIndex) {
+            const prev = document.getElementById(`hist-item-${lastActiveHistoryIndex}`);
+            if (prev) prev.classList.remove('active-move');
+        }
+
+        const activeItem = document.getElementById(`hist-item-${currentStepIndex}`);
+        if (activeItem) {
+            activeItem.classList.add('active-move');
+            pendingHistoryScrollIndex = currentStepIndex;
+
+            // Defer scroll calculations to rAF to reduce layout thrash
+            if (!historyScrollRafId) {
+                historyScrollRafId = requestAnimationFrame(() => {
+                    historyScrollRafId = 0;
+                    const idx = pendingHistoryScrollIndex;
+                    pendingHistoryScrollIndex = null;
+
+                    const container = document.getElementById('move-history-list');
+                    const item = document.getElementById(`hist-item-${idx}`);
+                    if (!container || !item) return;
+
+                    const itemTop = item.offsetTop;
+                    const itemHeight = item.offsetHeight;
+                    const containerHeight = container.offsetHeight;
+                    container.scrollTop = itemTop - (containerHeight / 2) + (itemHeight / 2);
+                });
+            }
+        }
+
+        lastActiveHistoryIndex = currentStepIndex;
+    }
+    
+    // --- Perf: build 8x8 board DOM once (pool), then update incrementally ---
+    function ensureBoardPool() {
+        const boardEl = document.getElementById('board');
+        if (!boardEl) return null;
+
+        // Rebuild only when structure is missing (e.g., first render or after template changes)
+        if (boardEl.children.length === 64 && boardEl.__SonettoPoolReady) return boardEl;
+
+        boardEl.innerHTML = '';
+        const fragment = document.createDocumentFragment();
+
+        // PERF: cache DOM references for fast incremental updates (avoid repeated children/index lookups)
+        const cells = new Array(64);
+        const discs = new Array(64);
+        const markers = new Array(64);
+        const hints = new Array(64);
+        const scores = new Array(64);
+
+        for (let y = 0; y < SIZE; y++) {
+            for (let x = 0; x < SIZE; x++) {
+                const cell = document.createElement('div');
+                cell.className = 'cell relative flex justify-center items-center cursor-pointer';
+                cell.id = `cell-${x}-${y}`;
+
+                // Pre-create children; toggle with class for minimal DOM churn
+                const disc = document.createElement('div'); disc.className = 'disc hidden'; cell.appendChild(disc);
+                const marker = document.createElement('div'); marker.className = 'last-move-marker hidden'; cell.appendChild(marker);
+                const hint = document.createElement('div'); hint.className = 'legal-move-hint hidden'; cell.appendChild(hint);
+
+                // PERF: pool eval-score node (avoid create/remove on every analysis render)
+                const score = document.createElement('span'); score.className = 'eval-score hidden'; cell.appendChild(score);
+
+                // Cache references
+                const idx = y * 8 + x;
+                cells[idx] = cell;
+                discs[idx] = disc;
+                markers[idx] = marker;
+                hints[idx] = hint;
+                scores[idx] = score;
+
+                // Bind once; handleBoardClick itself guards edit/AI states
+                cell.onclick = () => handleBoardClick(x, y);
+
+                fragment.appendChild(cell);
+            }
+        }
+        boardEl.appendChild(fragment);
+        boardEl.__SonettoPool = { cells, discs, markers, hints, scores };
+        boardEl.__SonettoPoolReady = true;
+        return boardEl;
+    }
+
+function uiRenderCurrentState() {
+        const state = gameHistory[currentStepIndex];
+        if (!state) return;
+
+        clearEvaluationScores();
+        const board = state.board;
+        const lastMove = state.lastMove;
+        const counts = state.counts;
+        const nextPlayer = state.player;
+
+        const showNumbers = document.getElementById('show-numbers').checked;
+        const showLegal = document.getElementById('show-legal').checked;
+
+        const boardEl = ensureBoardPool();
+        if (!boardEl) return;
+
+        // 仅在需要提示时计算合法着（减少无意义扫盘）
+        const isHumanTurn = !aiSide || (aiSide === WHITE && nextPlayer === BLACK) || (aiSide === BLACK && nextPlayer === WHITE);
+        const shouldShowHints = showLegal && !isEditMode && isHumanTurn;
+
+        let legalMask = null;
+        if (shouldShowHints) {
+            // PERF: reuse cached legal-move mask for this step (lossless)
+            legalMask = ensureStateMoveCache(state).mask;
+        }
+
+        // 仅在需要显示步号时计算
+        let moveNums = null;
+        if (showNumbers && !isEditMode) {
+            moveNums = (state.moveNums instanceof Int16Array && state.moveNums.length === 64)
+                ? state.moveNums
+                : ensureMoveNumsForStep(currentStepIndex);
+        }
+
+        // 增量更新（不再每次重建 64 个格子）
+        const pool = boardEl.__SonettoPool;
+        const usePool = !!(pool && pool.cells && pool.cells.length === 64);
+
+        for (let y = 0; y < SIZE; y++) {
+            for (let x = 0; x < SIZE; x++) {
+                const cellIdx = y * 8 + x;
+                const idx8 = (x << 3) | y;
+
+                const cell = usePool ? pool.cells[cellIdx] : boardEl.children[cellIdx];
+
+                // children: 0=disc, 1=marker, 2=hint (analysis score is pooled as child[3])
+                const discEl = usePool ? pool.discs[cellIdx] : cell.children[0];
+                const markerEl = usePool ? pool.markers[cellIdx] : cell.children[1];
+                const hintEl = usePool ? pool.hints[cellIdx] : cell.children[2];
+
+                const val = board[x][y];
+
+                // --- Disc ---
+                if (val !== EMPTY) {
+                    const cls = (val === BLACK) ? 'disc black' : 'disc white';
+                    if (discEl.className !== cls) discEl.className = cls;
+
+                    // reset text/styles each render (pooling requires explicit reset)
+                    if (moveNums) {
+                        const num = moveNums[idx8];
+                        if (num >= 0) {
+                            discEl.textContent = String(num);
+                            discEl.style.color = (val === BLACK) ? 'white' : '#333';
+                            if (num >= 100) discEl.style.fontSize = '8px';
+                            else if (num >= 10) discEl.style.fontSize = '10px';
+                            else discEl.style.fontSize = '';
+                        } else {
+                            discEl.textContent = '';
+                            discEl.style.color = '';
+                            discEl.style.fontSize = '';
+                        }
+                    } else {
+                        discEl.textContent = '';
+                        discEl.style.color = '';
+                        discEl.style.fontSize = '';
+                    }
+                } else {
+                    if (discEl.className !== 'disc hidden') discEl.className = 'disc hidden';
+                    discEl.textContent = '';
+                    discEl.style.color = '';
+                    discEl.style.fontSize = '';
+                }
+
+                // --- Last move marker ---
+                const showMarker = (!isEditMode && lastMove && lastMove.x === x && lastMove.y === y);
+                markerEl.className = showMarker ? 'last-move-marker' : 'last-move-marker hidden';
+
+                // --- Legal hint ---
+                const showHint = (!!legalMask && legalMask[idx8] === 1);
+                hintEl.className = showHint ? 'legal-move-hint' : 'legal-move-hint hidden';
+            }
+        }
+
+        // --- Counts / status ---
+        const blackCountEl = document.getElementById('black-count');
+        const whiteCountEl = document.getElementById('white-count');
+        if (blackCountEl) blackCountEl.textContent = counts.b;
+        if (whiteCountEl) whiteCountEl.textContent = counts.w;
+
+        const blackDot = document.getElementById('black-turn-dot');
+        const whiteDot = document.getElementById('white-turn-dot');
+        const blackInd = document.getElementById('black-indicator');
+        const whiteInd = document.getElementById('white-indicator');
+        const statusTextEl = document.getElementById('status-text');
+        const moveTextEl = document.getElementById('move-text');
+
+        if (isEditMode) {
+            updateStatusUI('IDLE', 'Editing...');
+            if (blackDot) blackDot.style.opacity = '0';
+            if (whiteDot) whiteDot.style.opacity = '0';
+            if (blackInd) blackInd.style.borderColor = 'transparent';
+            if (whiteInd) whiteInd.style.borderColor = 'transparent';
+            if (moveTextEl) moveTextEl.textContent = "Place discs freely";
+            return;
+        }
+
+        if (nextPlayer === BLACK) {
+            if (blackDot) blackDot.style.opacity = '1';
+            if (whiteDot) whiteDot.style.opacity = '0';
+            if (blackInd) blackInd.style.borderColor = '#444';
+            if (whiteInd) whiteInd.style.borderColor = 'transparent';
+            if (statusTextEl) statusTextEl.textContent = "Black's Turn";
+        } else {
+            if (blackDot) blackDot.style.opacity = '0';
+            if (whiteDot) whiteDot.style.opacity = '1';
+            if (blackInd) blackInd.style.borderColor = 'transparent';
+            if (whiteInd) whiteInd.style.borderColor = '#d6d3d1';
+            if (statusTextEl) statusTextEl.textContent = "White's Turn";
+        }
+
+        // PERF: cache canMove results per history step (avoid repeated full-board scans)
+        let bCanMove = state.canMoveBlack;
+        let wCanMove = state.canMoveWhite;
+        if (typeof bCanMove !== 'boolean' || typeof wCanMove !== 'boolean') {
+            bCanMove = canMove(board, BLACK);
+            wCanMove = canMove(board, WHITE);
+            state.canMoveBlack = bCanMove;
+            state.canMoveWhite = wCanMove;
+        }
+
+        if (!bCanMove && !wCanMove) {
+            updateStatusUI('DONE', 'Game Over');
+            if (statusTextEl) {
+                if (counts.b > counts.w) statusTextEl.textContent += " (Black)";
+                else if (counts.w > counts.b) statusTextEl.textContent += " (White)";
+                else statusTextEl.textContent += " (Draw)";
+            }
+        } else if (!isAiThinking && !AnalysisManager.isBusy) {
+            updateStatusUI('IDLE', 'Ready');
+        }
+
+        if (moveTextEl) {
+            if (lastMove) {
+                let pName = (state.player === BLACK) ? "White" : "Black";
+                let mText = lastMove.x === -1 ? "Passed" : coordToString(lastMove.x, lastMove.y);
+                moveTextEl.textContent = `Last: ${pName} to ${mText}`;
+            } else {
+                moveTextEl.textContent = "Start";
+            }
+        }
+}
+
+    function toggleAnalysisMode() {
+        if (isEditMode) return;
+        if (aiSide) return;
+
+        // 修复：关闭分析时同步 UI（面板/引擎文案/按钮）
+        if (isAnalysisMode && AnalysisManager.isBusy) {
+            stopAnalysis();
+            isAnalysisMode = false;
+
+            const panel = document.getElementById('analysis-details-panel');
+            if (panel) panel.classList.add('hidden');
+            updateEngineText("Engine: Standby", "text-stone-400");
+            updateStopButton(false);
+
+            return;
+        }
+
+        isAnalysisMode = !isAnalysisMode;
+        if (isAnalysisMode) {
+            document.getElementById('analysis-details-panel').classList.remove('hidden');
+            triggerAnalysisManager();
+        } else {
+            document.getElementById('analysis-details-panel').classList.add('hidden');
+            stopAnalysis();
+            updateEngineText("Engine: Standby", "text-stone-400");
+        }
+    }
+    function clearEvaluationScores() {
+        const boardEl = document.getElementById('board');
+        if (!boardEl) return;
+
+        // Fast-path: pooled board (64 cells), each has a pooled eval-score span at child[3]
+        if (boardEl.children && boardEl.children.length === 64) {
+            for (let i = 0; i < 64; i++) {
+                const cell = boardEl.children[i];
+                if (!cell || !cell.children) continue;
+
+                let span = (cell.children.length > 3) ? cell.children[3] : null;
+                if (span && span.classList && span.classList.contains('eval-score')) {
+                    // Reset without DOM removal (cheaper, less GC)
+                    if (span.textContent) span.textContent = '';
+                    if (span.className !== 'eval-score hidden') span.className = 'eval-score hidden';
+                } else {
+                    // Defensive fallback: hide any stray score elements
+                    const nodes = cell.querySelectorAll ? cell.querySelectorAll('.eval-score') : [];
+                    nodes.forEach(el => {
+                        if (el.textContent) el.textContent = '';
+                        el.className = 'eval-score hidden';
+                    });
+                }
+            }
+            return;
+        }
+
+        // Fallback: just hide any existing score nodes
+        document.querySelectorAll('#board .eval-score').forEach(el => {
+            if (el.textContent) el.textContent = '';
+            el.className = 'eval-score hidden';
+        });
+    }
+function triggerAnalysisManager() {
+    if (isEditMode) return;
+    const state = gameHistory[currentStepIndex];
+    if (!state) return;
+
+    // PERF: reuse cached move list for this step (lossless)
+    const moves = ensureStateMoveCache(state).moves;
+    if (!moves || moves.length === 0) return;
+
+    AnalysisManager.startAnalysis(state.board, state.player, moves);
+}
+    let analysisUiRafId = 0;
+    function updateAnalysisUI(results, mode) {
+        // Always numeric, integer. (Analysis: Top-4, AI: Top-1)
+        if (isAiThinking && aiSide) return;
+        if (!results || results.length === 0) return;
+        if (analysisUiRafId) cancelAnimationFrame(analysisUiRafId);
+        analysisUiRafId = requestAnimationFrame(() => {
+            analysisUiRafId = 0;
+            clearEvaluationScores();
+
+            const TOP_N = (typeof AnalysisManager !== 'undefined' && AnalysisManager && AnalysisManager._activeTopN) ? AnalysisManager._activeTopN : 4;
+            const sorted = [...results]
+                .filter(r => r && Number.isFinite(r.val))
+                .sort((a, b) => b.val - a.val)
+                .slice(0, TOP_N);
+
+            if (sorted.length === 0) return;
+
+            const bestVal = Math.round(sorted[0].val);
+            const EPS = 1e-9;
+
+            sorted.forEach((r, rankIndex) => {
+                const v = Math.round(r.val);
+                const text = (v > 0 ? ('+' + v) : String(v));
+                const styleClass = (rankIndex === 0 || Math.abs(v - bestVal) < EPS) ? 'score-best' : 'score-normal';
+                renderSingleScore(r.x, r.y, text, styleClass);
+            });
+        });
+    }
+        // PERF: batch analysis text updates to RAF to avoid DOM thrash during heavy analysis
+    let analysisTextRafId = 0;
+    let analysisTextPending = null;
+    let lastAnalysisTextHtml = null;
+
+    function updateAnalysisText(results, mode) {
+        analysisTextPending = { results, mode };
+
+        if (analysisTextRafId) return;
+        analysisTextRafId = requestAnimationFrame(() => {
+            analysisTextRafId = 0;
+
+            const pending = analysisTextPending;
+            analysisTextPending = null;
+
+            const container = document.getElementById('analysis-results-text');
+            if (!container) return;
+
+            const res = pending ? pending.results : null;
+            const md = pending ? (pending.mode || '') : '';
+
+            if (!Array.isArray(res) || res.length === 0) {
+                if (lastAnalysisTextHtml !== '') {
+                    container.innerHTML = '';
+                    lastAnalysisTextHtml = '';
+                }
+                return;
+            }
+
+            const TOP_N = (typeof AnalysisManager !== 'undefined' && AnalysisManager && AnalysisManager._activeTopN) ? AnalysisManager._activeTopN : 4;
+            const sorted = [...res]
+                .filter(r => r && Number.isFinite(r.val))
+                .sort((a, b) => b.val - a.val)
+                .slice(0, TOP_N);
+
+            const html = sorted.map((r, i) => {
+                if (!r) return '';
+                const coord = coordToString(r.x, r.y);
+                const v = Math.round(r.val);
+                const valStr = (v > 0 ? ('+' + v) : String(v));
+                const prefix = `<span class="text-stone-400">#${i + 1}</span> `;
+                return `${prefix}${coord}: ${valStr}`;
+            }).filter(s => s !== '').join('\n');
+
+            if (html !== lastAnalysisTextHtml) {
+                container.innerHTML = html;
+                lastAnalysisTextHtml = html;
+            }
+        });
+    }
+    function renderSingleScore(x, y, text, styleClass) {
+        const cell = document.getElementById(`cell-${x}-${y}`);
+        if (!cell) return;
+
+        // PERF: avoid querySelector for the disc node (it is always the 1st child in our pooled board)
+        const disc = (cell.children && cell.children.length) ? cell.children[0] : null;
+        if (disc && !disc.classList.contains('hidden')) return;
+
+        const currentState = gameHistory[currentStepIndex];
+        if (currentState && currentState.board[x][y] !== EMPTY) return;
+
+        // Use pooled eval-score span when available (child[3]) to avoid DOM churn
+        let span = (cell.children && cell.children.length > 3) ? cell.children[3] : null;
+        if (!span || !span.classList || !span.classList.contains('eval-score')) {
+            span = cell.querySelector ? cell.querySelector('.eval-score') : null;
+            if (!span) {
+                span = document.createElement('span');
+                span.className = 'eval-score hidden';
+                cell.appendChild(span);
+            }
+        }
+
+        span.textContent = text;
+        span.className = `eval-score ${styleClass}`; // make visible
+    }
+    
+    // ===== Export / Import (WASM-safe) =====
+// Export weights/config as a zip package (ZipLocal). No HTML injection.
+
+const SONETTO_EXPORT_FORMAT_VERSION = 2;
+const SONETTO_ENGINE_VERSION = window.__SONETTO_ENGINE_VERSION__ || 'sonetto-wasm@unknown';
+
+function openImportWeightsDialog() {
+  document.getElementById('import-weights-input')?.click();
+}
+
+function downloadBlob(blob, filename) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+}
+
+function float32ToLEBytes(f32) {
+  const buf = new ArrayBuffer(f32.length * 4);
+  const dv = new DataView(buf);
+  for (let i = 0; i < f32.length; i++) dv.setFloat32(i * 4, f32[i], true);
+  return new Uint8Array(buf);
+}
+
+function leBytesToFloat32(u8) {
+  if ((u8.byteLength % 4) !== 0) throw new Error('weights.f32 byteLength must be multiple of 4');
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const out = new Float32Array(u8.byteLength / 4);
+  for (let i = 0; i < out.length; i++) out[i] = dv.getFloat32(i * 4, true);
+  return out;
+}
+
+// Estimate the *uncompressed* parameter count represented by an Egaroucid eval.egev2 file.
+// This does not allocate the full parameter vector; it only scans the compressed stream.
+function estimateEgev2ParamCount(u8) {
+  try {
+    if (!u8 || u8.byteLength < 4) return null;
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const n = dv.getUint32(0, true) >>> 0;
+    const need = 4 + (n * 2);
+    if (u8.byteLength < need) return null;
+
+    let count = 0;
+    let off = 4;
+    for (let i = 0; i < n; i++) {
+      const v = dv.getInt16(off, true);
+      // Egaroucid format: v>=4096 means run-length of zeros (v-4096).
+      if (v >= 4096) count += (v - 4096);
+      else count += 1;
+      off += 2;
+    }
+    return count;
+  } catch (_) {
+    return null;
+  }
+}
+
+const CRC32_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[i] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32Hex(u8) {
+  let crc = 0 ^ (-1);
+  for (let i = 0; i < u8.length; i++) crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ u8[i]) & 0xff];
+  crc = (crc ^ (-1)) >>> 0;
+  return crc.toString(16).padStart(8, '0');
+}
+
+async function sha256Hex(u8) {
+  if (!crypto?.subtle) return null;
+  const digest = await crypto.subtle.digest('SHA-256', u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength));
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function computeChecksums(u8) {
+  return { sha256: await sha256Hex(u8), crc32: crc32Hex(u8) };
+}
+
+const SONETTO_WEIGHTS_DTYPE_EGEV2 = 'egev2-i16-rle';
+
+async function computeFeatureHash(engineVersion, weightCount, dtype = SONETTO_WEIGHTS_DTYPE_EGEV2) {
+  const txt = new TextEncoder().encode(`sonetto|wasm|${dtype}|count=${weightCount}|engine=${engineVersion}`);
+  const sha = await sha256Hex(txt);
+  return sha || `crc32:${crc32Hex(new Uint8Array(txt))}`;
+}
+
+async function fetchText(path) {
+  const res = await fetch(path, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`fetch failed: ${path} (${res.status})`);
+  return await res.text();
+}
+
+async function fetchArrayBuffer(path) {
+  const res = await fetch(path, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`fetch failed: ${path} (${res.status})`);
+  return await res.arrayBuffer();
+}
+
+async function exportEvolutionZip({ packageType = 'weights-only' } = {}) {
+  if (typeof ZipLocal === 'undefined') throw new Error('ZipLocal not loaded');
+
+  if (packageType !== 'weights-only' && packageType !== 'runnable') {
+    throw new Error(`Unsupported package_type: ${packageType}`);
+  }
+
+  const zip = ZipLocal.create();
+
+  // Prefer exporting directly from the engine worker so we always capture the latest weights.
+  let evalEgev2Bytes = null;
+  if (typeof AnalysisManager !== 'undefined' && AnalysisManager && typeof AnalysisManager.requestWeightsEgev2 === 'function') {
+    if (!AnalysisManager.workers || AnalysisManager.workers.length === 0) {
+      AnalysisManager.init(1);
+    }
+    const r = await AnalysisManager.requestWeightsEgev2();
+    evalEgev2Bytes = r?.evalEgev2Bytes || null;
+  }
+  if (!evalEgev2Bytes) {
+    const evalBytesSrc = (typeof window !== 'undefined') ? (window.__SONETTO_EGEV2_BYTES__ || null) : null;
+    evalEgev2Bytes = evalBytesSrc ? ((evalBytesSrc instanceof Uint8Array) ? evalBytesSrc : new Uint8Array(evalBytesSrc)) : null;
+  }
+  if (!evalEgev2Bytes) throw new Error('No eval.egev2 bytes available.');
+
+  // Count is the *uncompressed* param length (for metadata / compatibility checks).
+  const weightCount = estimateEgev2ParamCount(evalEgev2Bytes);
+  if (!(typeof weightCount === 'number' && Number.isFinite(weightCount) && weightCount > 0)) {
+    throw new Error('Unable to determine eval.egev2 parameter count');
+  }
+
+  const gensNumber = (
+    (typeof AnalysisManager !== 'undefined' && AnalysisManager && typeof AnalysisManager.lastGenerations === 'number')
+      ? AnalysisManager.lastGenerations
+      : (parseInt((document.getElementById('val-gen')?.textContent || '0'), 10) || 0)
+  );
+
+  const sumsW = await computeChecksums(evalEgev2Bytes);
+
+  const manifest = {
+    format_version: SONETTO_EXPORT_FORMAT_VERSION,
+    engine_version: SONETTO_ENGINE_VERSION,
+    created_utc: new Date().toISOString(),
+    package_type: packageType,
+    weights: {
+      file: 'eval.egev2',
+      dtype: SONETTO_WEIGHTS_DTYPE_EGEV2,
+      count: weightCount,
+      sha256: sumsW.sha256,
+      crc32: sumsW.crc32,
+    },
+    meta: {
+      generations: Math.floor(gensNumber),
+    },
+    optimizer: null,
+    // Reserve a slot for future SPSA state (optional)
+    spsa: null,
+    artifacts: {},
+    feature_hash: await computeFeatureHash(SONETTO_ENGINE_VERSION, weightCount, SONETTO_WEIGHTS_DTYPE_EGEV2),
+  };
+
+  // Canonical weights blob
+  zip.file('eval.egev2', evalEgev2Bytes);
+
+
+
+  if (packageType === 'runnable') {
+    // runnable package contains template + wasm assets. It is optional.
+    const htmlTemplate = (typeof window.INITIAL_TEMPLATE === 'string' && window.INITIAL_TEMPLATE.length > 0)
+      ? window.INITIAL_TEMPLATE
+      : await fetchText('./Sonetto.html');
+
+    zip.file('Sonetto.html', htmlTemplate);
+    // Local UI/vendor assets for offline runnable exports
+    try { zip.file('zip_local.js', await fetchText('./zip_local.js')); } catch (_) {}
+    try { zip.file('vendor/tailwind.css', await fetchText('./vendor/tailwind.css')); } catch (_) {}
+    try { zip.file('vendor/phosphor.css', await fetchText('./vendor/phosphor.css')); } catch (_) {}
+    try { zip.file('vendor/fflate.umd.js', await fetchText('./vendor/fflate.umd.js')); } catch (_) {}
+
+    zip.file('engine_worker.js', await fetchText('./engine_worker.js'));
+    // Opening book assets (Egaroucid .egbk3). Including the book file makes the runnable package
+    // significantly larger, but keeps it fully offline & consistent.
+    try { zip.file('egbk3_book.js', await fetchText('./egbk3_book.js')); } catch (_) {}
+    try { zip.file('book.egbk3', await fetchArrayBuffer('./book.egbk3')); } catch (_) {}
+    zip.file('pkg/sonetto_wasm.js', await fetchText('./pkg/sonetto_wasm.js'));
+    zip.file('pkg/sonetto_wasm_bg.wasm', await fetchArrayBuffer('./pkg/sonetto_wasm_bg.wasm'));
+  }
+
+  zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+
+  // ZipLocal always uses ZIP "store" (no compression) for maximum portability.
+  const blob = await zip.generateAsync({ type: 'blob' });
+  downloadBlob(blob, `Sonetto_Gen${Math.floor(gensNumber)}_${packageType}.zip`);
+}
+
+
+// UI: Export Weights button
+function saveEvolvedVersion() {
+  exportEvolutionZip({ packageType: 'weights-only' })
+    .catch(e => alert(e.message || String(e)));
+}
+
+// Optional: runnable package export
+function exportRunnableVersion() {
+  exportEvolutionZip({ packageType: 'runnable' })
+    .catch(e => alert(e.message || String(e)));
+}
+
+async function importWeightsZip(file) {
+  if (typeof ZipLocal === 'undefined') throw new Error('ZipLocal not loaded');
+  const zip = await ZipLocal.loadAsync(file);
+
+  const manifestText = await zip.file('manifest.json')?.async('string');
+  if (!manifestText) throw new Error('manifest.json missing');
+  const manifest = JSON.parse(manifestText);
+
+  const fmt = (manifest && typeof manifest.format_version === 'number') ? manifest.format_version : 1;
+  if (fmt !== 1 && fmt !== 2) throw new Error(`Unsupported format_version: ${fmt}`);
+
+  // Prefer new canonical weights blob: eval.egev2 (if present)
+  // Fall back to legacy weights.f32 for backwards compatibility.
+  const weightsEntry = (manifest && manifest.weights && typeof manifest.weights === 'object') ? manifest.weights : null;
+  const hasEvalEgev2 = !!zip.file('eval.egev2');
+
+  let weightCount = null;
+  let weightsFlat = null;       // Float32Array (legacy)
+  let evalEgev2Bytes = null;    // Uint8Array (new)
+  let loadedWeightsFile = null;
+
+  if (hasEvalEgev2) {
+    loadedWeightsFile = 'eval.egev2';
+    const buf = await zip.file(loadedWeightsFile)?.async('arraybuffer');
+    if (!buf) throw new Error(`${loadedWeightsFile} missing`);
+    evalEgev2Bytes = new Uint8Array(buf);
+
+    // Validate checksums when manifest.weights refers to this file (or declares egev2 dtype).
+    const sumsW = await computeChecksums(evalEgev2Bytes);
+    const entryMatches = !!(weightsEntry && typeof weightsEntry === 'object' && (
+      (typeof weightsEntry.file === 'string' && weightsEntry.file === loadedWeightsFile) ||
+      (typeof weightsEntry.dtype === 'string' && weightsEntry.dtype === SONETTO_WEIGHTS_DTYPE_EGEV2)
+    ));
+
+    const estCount = estimateEgev2ParamCount(evalEgev2Bytes);
+    if (weightsEntry && typeof weightsEntry.count === 'number') {
+      weightCount = weightsEntry.count;
+      if (typeof estCount === 'number' && Number.isFinite(estCount) && estCount > 0 && estCount !== weightCount) {
+        throw new Error(`weights count mismatch: manifest=${weightCount}, actual=${estCount}`);
+      }
+    } else {
+      weightCount = estCount;
+    }
+    if (!(typeof weightCount === 'number' && Number.isFinite(weightCount) && weightCount > 0)) {
+      throw new Error('Unable to determine eval.egev2 parameter count (manifest.weights.count missing)');
+    }
+
+    if (entryMatches) {
+      if (weightsEntry.sha256 && sumsW.sha256 && weightsEntry.sha256 !== sumsW.sha256) {
+        throw new Error('weights sha256 mismatch');
+      }
+      if (weightsEntry.crc32 && sumsW.crc32 && weightsEntry.crc32 !== sumsW.crc32) {
+        throw new Error('weights crc32 mismatch');
+      }
+    }
+  } else {
+    // Legacy: weights.f32
+    loadedWeightsFile = (weightsEntry && weightsEntry.file) || manifest.weights_file || 'weights.f32';
+    const buf = await zip.file(loadedWeightsFile)?.async('arraybuffer');
+    if (!buf) throw new Error(`${loadedWeightsFile} missing`);
+
+    const weightsU8 = new Uint8Array(buf);
+    weightCount = weightsU8.byteLength / 4;
+    if (weightsEntry && typeof weightsEntry.count === 'number' && weightsEntry.count !== weightCount) {
+      throw new Error(`weights count mismatch: manifest=${weightsEntry.count}, actual=${weightCount}`);
+    }
+
+    const sumsW = await computeChecksums(weightsU8);
+    if (weightsEntry && weightsEntry.sha256 && sumsW.sha256 && weightsEntry.sha256 !== sumsW.sha256) {
+      throw new Error('weights sha256 mismatch');
+    }
+    if (weightsEntry && weightsEntry.crc32 && sumsW.crc32 && weightsEntry.crc32 !== sumsW.crc32) {
+      throw new Error('weights crc32 mismatch');
+    }
+
+    weightsFlat = leBytesToFloat32(weightsU8);
+  }
+
+  // Apply optional config
+  if (manifest.config && typeof manifest.config === 'object') {
+    Object.assign(UserConfig, manifest.config);
+    if (typeof updateSettingsUI === 'function') updateSettingsUI(false);
+  }
+
+  // Model meta (generations)
+  const gens = (manifest.meta && typeof manifest.meta.generations === 'number') ? manifest.meta.generations : 0;
+
+  // Push into engine
+  if (AnalysisManager) {
+    AnalysisManager.lastGenerations = gens;
+
+    if (evalEgev2Bytes) {
+      // New path: send eval.egev2 bytes directly to workers.
+      window.__SONETTO_EGEV2_BYTES__ = evalEgev2Bytes;
+      window.__SONETTO_WEIGHTS_FLAT__ = null;
+      AnalysisManager.lastKnownWeights = null;
+
+      if (!AnalysisManager.workers || AnalysisManager.workers.length === 0) {
+        AnalysisManager.init(1);
+      }
+      const hashSizeMb = (parseInt(UserConfig.hashSize) || 8);
+      AnalysisManager.workers.forEach(w => {
+        w.postMessage({ type: 'set_weights_egev2', hashSizeMb, evalEgev2Bytes });
+      });
+    } else {
+      // Legacy path: weights.f32
+      window.__SONETTO_EGEV2_BYTES__ = null;
+      window.__SONETTO_WEIGHTS_FLAT__ = weightsFlat;
+      AnalysisManager.lastKnownWeights = weightsFlat;
+      await AnalysisManager.setWeightsFlat(weightsFlat);
+    }
+
+  }
+
+  const genEl = document.getElementById('val-gen');
+  if (genEl) genEl.textContent = String(gens);
+
+  try {
+    const msg = evalEgev2Bytes
+      ? `Imported weights: eval.egev2 (${weightCount} params)${fmt === 2 ? ' (v2)' : ''}`
+      : `Imported weights: ${weightCount} f32${fmt === 2 ? ' (v2)' : ''}`;
+    console.log('[Sonetto] ' + msg);
+  } catch (_) {}
+}
+
+
+
+// ---- BOOTSTRAP (added) ----
+(function bootSonetto() {
+  if (window.__SONETTO_BOOTED__) return;
+  window.__SONETTO_BOOTED__ = true;
+
+  const overlay = document.getElementById('app-loading-overlay');
+  const bar = document.getElementById('loading-bar');
+  const txt = document.getElementById('loading-text');
+
+  function setLoading(pct, msg) {
+    try {
+      if (bar) bar.style.width = `${Math.max(0, Math.min(100, pct | 0))}%`;
+      if (txt && typeof msg === 'string') txt.textContent = msg;
+    } catch (_) {}
+  }
+
+  function hideLoadingOverlay() {
+    if (!overlay || overlay.__sonettoHidden) return;
+    overlay.__sonettoHidden = true;
+    try {
+      overlay.style.opacity = '0';
+      overlay.style.pointerEvents = 'none';
+      // Let CSS transition finish, then remove.
+      setTimeout(() => {
+        try { overlay.classList.add('hidden'); } catch (_) {}
+        try { overlay.remove(); } catch (_) {}
+      }, 550);
+    } catch (_) {}
+  }
+
+  // Expose for worker "inited" callback.
+  window.__SONETTO_HIDE_LOADING__ = hideLoadingOverlay;
+
+  // Keyboard navigation (debugging positions): Left/Right to step.
+  if (!window.__SONETTO_KEYBINDS__) {
+    window.__SONETTO_KEYBINDS__ = true;
+    window.addEventListener('keydown', (e) => {
+      try {
+        if (!e || e.defaultPrevented) return;
+
+        const ae = document.activeElement;
+        const tag = (ae && ae.tagName) ? ae.tagName.toLowerCase() : '';
+        const isTyping = (tag === 'input' || tag === 'textarea' || tag === 'select' || (ae && ae.isContentEditable));
+        if (isTyping) return;
+
+        // Don't hijack keys when modals are open.
+        const aiModal = document.getElementById('ai-modal');
+        const turnModal = document.getElementById('turn-modal');
+        if (aiModal && !aiModal.classList.contains('hidden')) return;
+        if (turnModal && !turnModal.classList.contains('hidden')) return;
+
+        if (e.key === 'ArrowLeft' || e.key === 'BrowserBack' || e.key === 'a' || e.key === 'A') {
+          e.preventDefault();
+          if (typeof step === 'function') step(-1);
+        } else if (e.key === 'ArrowRight' || e.key === 'BrowserForward' || e.key === 'd' || e.key === 'D') {
+          e.preventDefault();
+          if (typeof step === 'function') step(1);
+        } else if (e.key === 'PageUp') {
+          e.preventDefault();
+          if (typeof step === 'function') step(-10);
+        } else if (e.key === 'PageDown') {
+          e.preventDefault();
+          if (typeof step === 'function') step(10);
+        } else if (e.key === 'Home') {
+          e.preventDefault();
+          if (typeof jumpToStep === 'function') jumpToStep(0);
+        } else if (e.key === 'End') {
+          e.preventDefault();
+          if (typeof jumpToEnd === 'function') jumpToEnd();
+        }
+      } catch (_) {}
+    }, { passive: false });
+  }
+
+  try {
+    setLoading(10, 'Initializing...');
+
+    // Load config into UI if available
+    try { if (typeof loadDefaultConfig === 'function') loadDefaultConfig(); } catch (_) {}
+    try { if (typeof updateSettingsUI === 'function') updateSettingsUI(false); } catch (_) {}
+
+    // Initialize board/history (empty input => initial position)
+    const input = document.getElementById('move-input');
+    if (input && !input.value) {
+      input.value = (typeof DEFAULT_GAME === 'string') ? DEFAULT_GAME : '';
+    }
+
+    setLoading(35, 'Loading position...');
+    if (typeof parseAndLoad === 'function') parseAndLoad();
+
+    // Kick off opening-book load (async, does not block engine init).
+    try { if (typeof startEgbk3BookLoad === 'function') startEgbk3BookLoad(); } catch (_) {}
+
+    // Load weights (eval.egev2 / eval.egev2.gz) first when available.
+    // If auto-load fails, user can still use “Import Weights”.
+    setLoading(45, 'Loading weights...');
+    Promise.resolve(sonettoAutoLoadWeights(setLoading)).finally(() => {
+      // Start WASM worker pool (1 worker is enough for WASM engine)
+      setLoading(65, 'Starting engine...');
+      if (typeof AnalysisManager !== 'undefined' && AnalysisManager && typeof AnalysisManager.init === 'function') {
+        AnalysisManager.init(1);
+
+        // Expose the manager to the Playwright self-check harness.
+        // (Normal users do not pass ?selfcheck=1.)
+        if (__SONETTO_SELF_CHECK__) {
+          try { window.AnalysisManager = AnalysisManager; } catch (_) {}
+        }
+      }
+    });
+
+    // Fallback: never let the overlay block the UI forever.
+    setTimeout(() => {
+      if (!window.__SONETTO_ENGINE_READY__) hideLoadingOverlay();
+    }, 8000);
+  } catch (err) {
+    console.error('Boot failed:', err);
+    hideLoadingOverlay();
+  }
+})();
+
+</script>
+<script>
+/**
+ * PWA: Service Worker + “Add to Home Screen” helper.
+ * - Android/desktop (Chromium): uses beforeinstallprompt.
+ * - iOS Safari: shows a small guide (cannot programmatically prompt).
+ */
+(function () {
+  // --- Service Worker ---
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+    });
+  }
+
+  // --- Add to Home Screen UI ---
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const isSafari = isIOS && /safari/i.test(navigator.userAgent) && !/crios|fxios|opios|edgios/i.test(navigator.userAgent);
+  const isInStandalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || (navigator.standalone === true);
+
+  let deferredPrompt = null;
+
+  function shouldShowIOSHint() {
+    try {
+      const key = '__sonetto_a2hs_ios_last__';
+      const last = Number(localStorage.getItem(key) || '0');
+      const now = Date.now();
+      // show at most once every 7 days
+      if (now - last < 7 * 24 * 60 * 60 * 1000) return false;
+      localStorage.setItem(key, String(now));
+      return true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function ensureInstallButton() {
+    if (document.getElementById('sonetto-install-btn')) return null;
+
+    const btn = document.createElement('button');
+    btn.id = 'sonetto-install-btn';
+    btn.type = 'button';
+    btn.textContent = '添加到主屏幕';
+    btn.setAttribute('aria-label', 'Add to Home Screen');
+    btn.style.cssText = [
+      'position:fixed',
+      'right:16px',
+      'bottom:16px',
+      'z-index:9998',
+      'padding:10px 12px',
+      'border-radius:12px',
+      'border:1px solid rgba(0,0,0,0.12)',
+      'background:#ffffff',
+      'box-shadow:0 10px 20px rgba(0,0,0,0.15)',
+      'font-size:12px',
+      'font-weight:700',
+      'color:#1c1917'
+    ].join(';');
+    document.body.appendChild(btn);
+    return btn;
+  }
+
+  function showIOSGuide() {
+    const existing = document.getElementById('sonetto-ios-a2hs');
+    if (existing) return;
+
+    const wrap = document.createElement('div');
+    wrap.id = 'sonetto-ios-a2hs';
+    wrap.style.cssText = [
+      'position:fixed',
+      'left:16px',
+      'right:16px',
+      'bottom:16px',
+      'z-index:9999',
+      'background:rgba(255,255,255,0.97)',
+      'border:1px solid rgba(0,0,0,0.12)',
+      'border-radius:16px',
+      'padding:12px 12px',
+      'box-shadow:0 10px 25px rgba(0,0,0,0.18)',
+      'backdrop-filter:blur(10px)'
+    ].join(';');
+
+    wrap.innerHTML = `
+      <div style="display:flex; align-items:flex-start; gap:10px;">
+        <div style="font-size:18px; line-height:1;">📌</div>
+        <div style="flex:1;">
+          <div style="font-weight:800; font-size:13px; color:#1c1917; margin-bottom:4px;">添加到主屏幕</div>
+          <div style="font-size:12px; color:#57534e; line-height:1.35;">
+            在 Safari 中点击 <b>分享</b>（方框+上箭头），然后选择 <b>“添加到主屏幕”</b>。
+          </div>
+        </div>
+        <button id="sonetto-ios-a2hs-close" style="border:none; background:transparent; font-size:18px; line-height:1; padding:0; color:#78716c;">×</button>
+      </div>
+    `;
+    document.body.appendChild(wrap);
+    const close = document.getElementById('sonetto-ios-a2hs-close');
+    if (close) close.addEventListener('click', () => wrap.remove(), { passive: true });
+  }
+
+  // iOS: show guide once in a while
+  if (!isInStandalone && isSafari && shouldShowIOSHint()) {
+    // wait a bit to avoid covering the loading overlay
+    setTimeout(showIOSGuide, 2200);
+  }
+
+  // Chromium install prompt
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+
+    if (isInStandalone) return;
+    const btn = ensureInstallButton();
+    if (!btn) return;
+
+    btn.onclick = async () => {
+      try {
+        btn.disabled = true;
+        btn.textContent = '正在打开...';
+        await deferredPrompt.prompt();
+        await deferredPrompt.userChoice;
+      } catch (_) {}
+      try { btn.remove(); } catch (_) {}
+      deferredPrompt = null;
+    };
+  });
+
+  // Hide install button if installed
+  window.addEventListener('appinstalled', () => {
+    const btn = document.getElementById('sonetto-install-btn');
+    if (btn) btn.remove();
+  });
+})();
+</script>
+</body>
+</html>

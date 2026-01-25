@@ -1,0 +1,64 @@
+[package]
+name = "sonetto_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+libm = "0.2"
+rayon = { version = "1.10", optional = true }
+
+[features]
+# Default build profile focuses on **single-searcher throughput** (NPS):
+# - `tt_plain` avoids atomic overhead when the TT is not shared across threads.
+#   (Sonetto's parallel helpers use *per-worker* searchers, so this is the
+#   common/high-performance configuration.)
+# - `flips_table` enables the 8-bit line flip lookup table (Egaroucid-style),
+#   which is a high ROI speedup on the hot flip-generation path.
+# - `stability_cutoff` keeps Sensei-style provable bounds that often reduce
+#   search work in the late midgame / endgame.
+default = ["stability_cutoff", "tt_plain", "flips_table"]
+stability_cutoff = []
+tt_plain = []
+tt_atomic = []
+flips_table = []
+wasm_simd = []
+
+# P2-4: Parallel evaluation/search helpers.
+#
+# This feature is intentionally optional so that:
+# - default/native builds remain dependency-light
+# - wasm builds can opt-in only when threads (SharedArrayBuffer + atomics)
+#   are enabled.
+parallel_rayon = ["dep:rayon"]
+
+[[test]]
+name = "movegen"
+path = "test/movegen.rs"
+
+[[test]]
+name = "sensei_extras_move_selector"
+path = "test/sensei_extras_move_selector.rs"
+
+[[test]]
+name = "sensei_extras_win_probability"
+path = "test/sensei_extras_win_probability.rs"
+
+[[test]]
+name = "sensei_ab_legal"
+path = "test/sensei_ab_legal.rs"
+
+[[test]]
+name = "sensei_ab_regression"
+path = "test/sensei_ab_regression.rs"
+
+[[test]]
+name = "derivative_backend_switch"
+path = "test/derivative_backend_switch.rs"
+
+[[test]]
+name = "derivative_bounds_monotonic"
+path = "test/derivative_bounds_monotonic.rs"
+

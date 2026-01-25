@@ -1,0 +1,14 @@
+{
+  "name": "sonetto-web-ui",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "tailwindcss": "^3.4.10",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.41"
+  },
+  "scripts": {
+    "build:tailwind": "tailwindcss -i ./tailwind.input.css -o ./vendor/tailwind.css --minify",
+    "localize:ui": "node ../scripts/localize_ui.mjs --build-tailwind --with-fflate --with-phosphor"
+  }
+}
