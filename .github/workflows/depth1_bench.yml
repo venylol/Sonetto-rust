@@ -1,0 +1,74 @@
+
+name: Depth1 Benchmark (Egaroucid vs Sensei)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      games:
+        description: "Number of games"
+        required: false
+        default: "10000"
+      report_every:
+        description: "Report every N games"
+        required: false
+        default: "100"
+      seed:
+        description: "Random seed (optional)"
+        required: false
+        default: ""
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake python3
+
+      - name: Build Egaroucid (GTP)
+        run: |
+          rm -rf build/egaroucid
+          mkdir -p build/egaroucid
+          g++ -O3 -std=c++17 -fopenmp -mavx2 -mbmi -mbmi2 -msse4.1 \
+            -I Egaroucid-engine/src \
+            Egaroucid-engine/src/Egaroucid_for_Console.cpp \
+            -o build/egaroucid/egaroucid_gtp
+          mkdir -p build/egaroucid/resources
+          cp Egaroucid-engine/resources/eval.egev2 build/egaroucid/resources/eval.egev2
+          cp Egaroucid-engine/resources/eval_move_ordering_end.egev build/egaroucid/resources/eval_move_ordering_end.egev
+
+      - name: Build Sensei depth1 GTP
+        run: |
+          rm -rf build/sensei
+          cmake -S sensei-engine/gtp_depth1 -B build/sensei
+          cmake --build build/sensei -j
+
+      - name: Run benchmark
+        run: |
+          GAMES="${{ github.event.inputs.games }}"
+          if [ -z "$GAMES" ]; then GAMES="10000"; fi
+          REP="${{ github.event.inputs.report_every }}"
+          if [ -z "$REP" ]; then REP="100"; fi
+          SEED="${{ github.event.inputs.seed }}"
+          EXTRA=""
+          if [ -n "$SEED" ]; then EXTRA="--seed $SEED"; fi
+          python3 scripts/match.py \
+            --games "$GAMES" \
+            --report_every "$REP" \
+            $EXTRA \
+            --xot_file "XOT opening.txt" \
+            --egar "./build/egaroucid/egaroucid_gtp" \
+            --sensei "./build/sensei/sensei_depth1_gtp" \
+            --log "benchmark_results.log"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: depth1-benchmark-results
+          path: benchmark_results.log
